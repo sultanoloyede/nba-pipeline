@@ -44,20 +44,20 @@ jobs:
         id: phases
         run: |
           if [ "${{ github.event_name }}" = "schedule" ]; then
-            # Daily cron job - runs phases 1, 2, 4
+            # Daily cron job - runs phases 2 and 2.5 (data processing and percentages)
             if [ "${{ github.event.schedule }}" = "0 10 * * *" ]; then
-              echo "phases=1,2,4" >> $GITHUB_OUTPUT
-              echo "Running daily pipeline (Phases 1, 2, 4)"
-            # Weekly cron job - runs all phases including model training
+              echo "phases=2,2.5" >> $GITHUB_OUTPUT
+              echo "Running daily pipeline (Phases 2, 2.5)"
+            # Weekly cron job - runs phases 2, 2.5, and 3 (includes model training)
             else
-              echo "phases=1,2,3,4" >> $GITHUB_OUTPUT
-              echo "Running weekly pipeline (Phases 1, 2, 3, 4)"
+              echo "phases=2,2.5,3" >> $GITHUB_OUTPUT
+              echo "Running weekly pipeline (Phases 2, 2.5, 3)"
             fi
           else
             # Manual trigger - use input
             PHASES="${{ github.event.inputs.phases }}"
             if [ "$PHASES" = "all" ]; then
-              echo "phases=1,2,3,4" >> $GITHUB_OUTPUT
+              echo "phases=2,2.5,3" >> $GITHUB_OUTPUT
             else
               echo "phases=$PHASES" >> $GITHUB_OUTPUT
             fi
