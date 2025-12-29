@@ -17,6 +17,7 @@ import argparse
 import logging
 from datetime import datetime
 import traceback
+import subprocess
 
 # Setup logging
 log_dir = os.path.join(os.path.dirname(__file__), 'logs')
@@ -55,14 +56,14 @@ class PipelineOrchestrator:
             '2.5': {
                 'name': 'Pre-calculate Percentages',
                 'script': 'phase2_5_precalculate_all_percentages.py',
-                'description': 'Pre-calculates all threshold percentages (10-51)',
-                'estimated_time': '30-40 minutes'
+                'description': 'Pre-calculates all threshold percentages for all stat types (PRA, PA, PR, RA)',
+                'estimated_time': '120-150 minutes'  # Updated: 4 stat types * 30-40 min
             },
             '3': {
                 'name': 'Model Training',
                 'script': 'phase3_optimized.py',
-                'description': 'Trains 42 XGBoost models for different PRA thresholds',
-                'estimated_time': '30-35 minutes'
+                'description': 'Trains 132 XGBoost models for all stat types (42 PRA + 34 PA + 34 PR + 22 RA)',
+                'estimated_time': '120-150 minutes'  # Updated: 4 stat types * 30-35 min
             },
             '4': {
                 'name': 'Generate Predictions',
@@ -95,6 +96,169 @@ class PipelineOrchestrator:
         logger.info("All required environment variables found")
         return True
 
+    def execute_script_with_args(self, script_path: str, args: list) -> bool:
+        """
+        Execute a Python script with command-line arguments.
+
+        Args:
+            script_path: Path to the Python script
+            args: List of command-line arguments
+
+        Returns:
+            bool: True if successful, False otherwise
+        """
+        cmd = ['python', script_path] + args
+        logger.info(f"Executing: {' '.join(cmd)}")
+
+        try:
+            result = subprocess.run(
+                cmd,
+                cwd=self.script_dir,
+                capture_output=True,
+                text=True,
+                timeout=7200  # 2 hour timeout
+            )
+
+            if result.returncode == 0:
+                if result.stdout:
+                    logger.info(result.stdout)
+                return True
+            else:
+                logger.error(f"Script failed with return code {result.returncode}")
+                if result.stderr:
+                    logger.error(result.stderr)
+                return False
+        except subprocess.TimeoutExpired:
+            logger.error(f"Script execution timed out after 2 hours")
+            return False
+        except Exception as e:
+            logger.error(f"Error executing script: {e}")
+            return False
+
+    def run_phase_2_5_all_stats(self) -> bool:
+        """Run Phase 2.5 for all stat types (PRA, PA, PR, RA)"""
+        stat_configs = {
+            'PRA': {'threshold_start': 10, 'threshold_end': 51},
+            'PA': {'threshold_start': 8, 'threshold_end': 41},
+            'PR': {'threshold_start': 8, 'threshold_end': 41},
+            'RA': {'threshold_start': 5, 'threshold_end': 26}
+        }
+
+        phase = self.phases['2.5']
+        script_path = os.path.join(self.script_dir, phase['script'])
+
+        if not os.path.exists(script_path):
+            logger.error(f"Phase 2.5 script not found: {script_path}")
+            return False
+
+        logger.info("=" * 80)
+        logger.info(f"Starting Phase 2.5: {phase['name']} (Multi-Stat)")
+        logger.info(f"Description: {phase['description']}")
+        logger.info(f"Estimated time: {phase['estimated_time']}")
+        logger.info("=" * 80)
+
+        start_time = datetime.now()
+        all_success = True
+        completed_stats = []
+
+        for idx, (stat_type, config) in enumerate(stat_configs.items(), 1):
+            logger.info(f"\n[{idx}/{len(stat_configs)}] Running Phase 2.5 for {stat_type}...")
+            logger.info(f"Threshold range: {config['threshold_start']} to {config['threshold_end']}")
+
+            args = [
+                '--stat-type', stat_type,
+                '--threshold-start', str(config['threshold_start']),
+                '--threshold-end', str(config['threshold_end'])
+            ]
+
+            stat_start = datetime.now()
+            success = self.execute_script_with_args(script_path, args)
+            stat_end = datetime.now()
+            stat_duration = (stat_end - stat_start).total_seconds() / 60
+
+            if success:
+                logger.info(f"Phase 2.5 for {stat_type} completed in {stat_duration:.2f} minutes")
+                completed_stats.append(stat_type)
+            else:
+                logger.error(f"Phase 2.5 for {stat_type} failed after {stat_duration:.2f} minutes")
+                all_success = False
+                break  # Stop on first failure
+
+        end_time = datetime.now()
+        total_duration = (end_time - start_time).total_seconds() / 60
+
+        if all_success:
+            logger.info(f"Phase 2.5 completed successfully for all stat types in {total_duration:.2f} minutes")
+            logger.info(f"Completed stat types: {', '.join(completed_stats)}")
+        else:
+            logger.error(f"Phase 2.5 failed after {total_duration:.2f} minutes")
+            logger.error(f"Completed stat types: {', '.join(completed_stats)}")
+            logger.error(f"Failed on stat type: {stat_type}")
+
+        return all_success
+
+    def run_phase_3_all_stats(self) -> bool:
+        """Run Phase 3 for all stat types (PRA, PA, PR, RA)"""
+        stat_configs = {
+            'PRA': {'threshold_start': 10, 'threshold_end': 51},
+            'PA': {'threshold_start': 8, 'threshold_end': 41},
+            'PR': {'threshold_start': 8, 'threshold_end': 41},
+            'RA': {'threshold_start': 5, 'threshold_end': 26}
+        }
+
+        phase = self.phases['3']
+        script_path = os.path.join(self.script_dir, phase['script'])
+
+        if not os.path.exists(script_path):
+            logger.error(f"Phase 3 script not found: {script_path}")
+            return False
+
+        logger.info("=" * 80)
+        logger.info(f"Starting Phase 3: {phase['name']} (Multi-Stat)")
+        logger.info(f"Description: {phase['description']}")
+        logger.info(f"Estimated time: {phase['estimated_time']}")
+        logger.info("=" * 80)
+
+        start_time = datetime.now()
+        all_success = True
+        completed_stats = []
+
+        for idx, (stat_type, config) in enumerate(stat_configs.items(), 1):
+            logger.info(f"\n[{idx}/{len(stat_configs)}] Running Phase 3 for {stat_type}...")
+            logger.info(f"Threshold range: {config['threshold_start']} to {config['threshold_end']}")
+
+            args = [
+                '--stat-type', stat_type,
+                '--threshold-start', str(config['threshold_start']),
+                '--threshold-end', str(config['threshold_end'])
+            ]
+
+            stat_start = datetime.now()
+            success = self.execute_script_with_args(script_path, args)
+            stat_end = datetime.now()
+            stat_duration = (stat_end - stat_start).total_seconds() / 60
+
+            if success:
+                logger.info(f"Phase 3 for {stat_type} completed in {stat_duration:.2f} minutes")
+                completed_stats.append(stat_type)
+            else:
+                logger.error(f"Phase 3 for {stat_type} failed after {stat_duration:.2f} minutes")
+                all_success = False
+                break  # Stop on first failure
+
+        end_time = datetime.now()
+        total_duration = (end_time - start_time).total_seconds() / 60
+
+        if all_success:
+            logger.info(f"Phase 3 completed successfully for all stat types in {total_duration:.2f} minutes")
+            logger.info(f"Completed stat types: {', '.join(completed_stats)}")
+        else:
+            logger.error(f"Phase 3 failed after {total_duration:.2f} minutes")
+            logger.error(f"Completed stat types: {', '.join(completed_stats)}")
+            logger.error(f"Failed on stat type: {stat_type}")
+
+        return all_success
+
     def run_phase(self, phase_num: str) -> bool:
         """
         Run a specific pipeline phase
@@ -105,6 +269,13 @@ class PipelineOrchestrator:
         Returns:
             bool: True if phase succeeded, False otherwise
         """
+        # Special handling for Phase 2.5 and Phase 3 (multi-stat)
+        if phase_num == '2.5':
+            return self.run_phase_2_5_all_stats()
+        elif phase_num == '3':
+            return self.run_phase_3_all_stats()
+
+        # For other phases, use existing logic
         if phase_num not in self.phases:
             logger.error(f"Invalid phase number: {phase_num}")
             return False

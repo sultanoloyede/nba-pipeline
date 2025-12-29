@@ -401,6 +401,19 @@ def run_phase_2_optimized(s3_handler) -> Tuple[bool, dict]:
             combined_df['PRA'] = combined_df['PTS'] + combined_df['REB'] + combined_df['AST']
             logger.info("  ✓ Added PRA column")
 
+        # Additional stat combinations (PA, PR, RA)
+        if 'PA' not in combined_df.columns:
+            combined_df['PA'] = combined_df['PTS'] + combined_df['AST']
+            logger.info("  ✓ Added PA column")
+
+        if 'PR' not in combined_df.columns:
+            combined_df['PR'] = combined_df['PTS'] + combined_df['REB']
+            logger.info("  ✓ Added PR column")
+
+        if 'RA' not in combined_df.columns:
+            combined_df['RA'] = combined_df['REB'] + combined_df['AST']
+            logger.info("  ✓ Added RA column")
+
         # Parse dates (vectorized)
         combined_df['GAME_DATE_PARSED'] = pd.to_datetime(combined_df['GAME_DATE'], format='%b %d, %Y')
         logger.info("  ✓ Parsed game dates")
@@ -451,7 +464,7 @@ def run_phase_2_optimized(s3_handler) -> Tuple[bool, dict]:
             'total_teams': combined_df['TEAM'].nunique(),
             'date_range': f"{combined_df['GAME_DATE_PARSED'].min()} to {combined_df['GAME_DATE_PARSED'].max()}",
             'features_added': [
-                'PRA', 'GAME_DATE_PARSED', 'TEAM', 'OPPONENT',
+                'PRA', 'PA', 'PR', 'RA', 'GAME_DATE_PARSED', 'TEAM', 'OPPONENT',
                 'lineup_average', 'last_5_avg', 'last_10_avg', 'last_20_avg',
                 'season_avg', 'last_season_avg', 'h2h_avg', 'opp_strength'
             ],

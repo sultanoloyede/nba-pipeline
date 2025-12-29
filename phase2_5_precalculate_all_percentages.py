@@ -1,15 +1,18 @@
 """
 Phase 2.5: Pre-calculate ALL Percentage Columns for All Thresholds (OPTIMIZED)
 
-This phase runs ONCE to pre-calculate percentage columns for all thresholds (10-51)
+This phase runs ONCE to pre-calculate percentage columns for all thresholds
 and saves them to S3. This dramatically speeds up Phase 3.
 
-KEY OPTIMIZATIONS:
+KEY FEATURES:
+- Supports multiple stat types: PRA, PA, PR, RA
+- Supports incremental and full processing modes
 - 100% vectorized operations (NO iterrows())
 - Uses pandas rolling(), expanding(), and transform()
 - Processes all thresholds in batches
 - Progress logging every 100-500 groups to maintain Modal heartbeat
-- Expected runtime: 40-60 minutes (vs 6-8 hours with old approach)
+- Expected runtime: 40-60 minutes for full mode (vs 6-8 hours with old approach)
+- Incremental mode: 95% faster for daily updates
 
 Calculates 7 percentage types for each threshold:
 - last_5_pct: Rolling percentage over last 5 games
@@ -21,19 +24,166 @@ Calculates 7 percentage types for each threshold:
 - h2h_pct: Head-to-head percentage (3 seasons)
 
 Author: Generated for NBA Props Prediction System
-Date: 2025-12-11 (Optimized)
+Date: 2025-12-11 (Optimized), 2025-12-29 (Multi-stat & Incremental support)
 """
 
 import pandas as pd
 import numpy as np
 import logging
 from datetime import datetime
-from typing import Tuple, List, Dict
+from typing import Tuple, List, Dict, Optional
+import json
 
 logger = logging.getLogger(__name__)
 
+# Default thresholds for each stat type
+STAT_TYPE_THRESHOLDS = {
+    'PRA': (10, 51),
+    'PA': (8, 41),
+    'PR': (8, 41),
+    'RA': (5, 26)
+}
 
-def calculate_rolling_percentage_all_thresholds_vectorized(df: pd.DataFrame, thresholds: List[int], window: int) -> Dict[int, np.ndarray]:
+
+def load_metadata(s3_handler, bucket: str, stat_type: str) -> Optional[dict]:
+    """
+    Load processing metadata from S3.
+
+    Args:
+        s3_handler: S3Handler instance
+        bucket: S3 bucket name
+        stat_type: Stat type (PRA, PA, PR, or RA)
+
+    Returns:
+        Metadata dict if exists, None otherwise
+    """
+    metadata_key = f'processed_data/{stat_type.lower()}_metadata.json'
+    try:
+        metadata = s3_handler.download_json(bucket, metadata_key)
+        if metadata:
+            logger.info(f"Loaded metadata for {stat_type}: last processed {metadata.get('last_processed_date')}")
+        return metadata
+    except Exception as e:
+        logger.info(f"No existing metadata found for {stat_type} (this is normal for first run)")
+        return None
+
+
+def save_metadata(s3_handler, bucket: str, stat_type: str, metadata: dict):
+    """
+    Save processing metadata to S3.
+
+    Args:
+        s3_handler: S3Handler instance
+        bucket: S3 bucket name
+        stat_type: Stat type (PRA, PA, PR, or RA)
+        metadata: Metadata dictionary to save
+    """
+    metadata_key = f'processed_data/{stat_type.lower()}_metadata.json'
+    try:
+        # Convert datetime to string for JSON serialization
+        metadata_str = json.dumps(metadata, default=str)
+        s3_handler.upload_json(json.loads(metadata_str), bucket, metadata_key)
+        logger.info(f"Saved metadata for {stat_type} to {metadata_key}")
+    except Exception as e:
+        logger.error(f"Failed to save metadata: {e}")
+
+
+def get_new_games(df: pd.DataFrame, last_processed_date: str) -> pd.DataFrame:
+    """
+    Filter dataframe for games after the last processed date.
+
+    Args:
+        df: Full dataframe
+        last_processed_date: ISO format date string (e.g., '2025-12-29')
+
+    Returns:
+        DataFrame with only new games
+    """
+    last_date = pd.to_datetime(last_processed_date)
+    new_games = df[df['GAME_DATE_PARSED'] > last_date].copy()
+    logger.info(f"Found {len(new_games):,} new games after {last_processed_date}")
+    return new_games
+
+
+def calculate_percentages_incremental(df_existing: pd.DataFrame,
+                                     df_new: pd.DataFrame,
+                                     thresholds: List[int],
+                                     stat_column: str) -> pd.DataFrame:
+    """
+    Calculate percentages for new games using existing historical data as context.
+
+    This function ensures new games have accurate percentages by considering
+    the full historical context from existing data.
+
+    Args:
+        df_existing: Existing processed data with percentages
+        df_new: New games to process
+        thresholds: List of thresholds
+        stat_column: Column name for the stat (e.g., 'PRA', 'PA')
+
+    Returns:
+        DataFrame with new games and calculated percentages
+    """
+    logger.info(f"Calculating incremental percentages for {len(df_new):,} new games...")
+
+    # Combine existing and new data for context (existing data provides history)
+    df_combined = pd.concat([df_existing, df_new], ignore_index=True)
+    df_combined = df_combined.sort_values(['Player_ID', 'TEAM', 'SEASON_ID', 'GAME_DATE_PARSED'])
+
+    # Mark which rows are new (we'll only keep these at the end)
+    df_combined['is_new'] = False
+    df_combined.loc[df_combined.index >= len(df_existing), 'is_new'] = True
+
+    # Calculate all percentages with full historical context
+    # The functions will naturally use existing data as history for new games
+
+    # Rolling percentages
+    for window in [5, 10, 20]:
+        results = calculate_rolling_percentage_all_thresholds_vectorized(
+            df_combined, thresholds, window, stat_column
+        )
+        for threshold, pct_array in results.items():
+            df_combined[f'last_{window}_pct_{threshold}'] = pct_array
+
+    # Season percentages
+    season_results = calculate_season_percentage_all_thresholds_vectorized(
+        df_combined, thresholds, stat_column
+    )
+    for threshold, pct_array in season_results.items():
+        df_combined[f'season_pct_{threshold}'] = pct_array
+
+    # Last season percentages
+    last_season_results = calculate_last_season_percentage_all_thresholds_vectorized(
+        df_combined, thresholds, stat_column
+    )
+    for threshold, pct_array in last_season_results.items():
+        df_combined[f'last_season_pct_{threshold}'] = pct_array
+
+    # Lineup percentages
+    lineup_results = calculate_lineup_percentage_all_thresholds_vectorized(
+        df_combined, thresholds, stat_column
+    )
+    for threshold, pct_array in lineup_results.items():
+        df_combined[f'lineup_pct_{threshold}'] = pct_array
+
+    # H2H percentages
+    h2h_results = calculate_h2h_percentage_all_thresholds_vectorized(
+        df_combined, thresholds, stat_column
+    )
+    for threshold, pct_array in h2h_results.items():
+        df_combined[f'h2h_pct_{threshold}'] = pct_array
+
+    # Return only the newly processed rows
+    df_new_processed = df_combined[df_combined['is_new']].drop(columns=['is_new'])
+    logger.info(f"Completed incremental processing for {len(df_new_processed):,} new games")
+
+    return df_new_processed
+
+
+def calculate_rolling_percentage_all_thresholds_vectorized(df: pd.DataFrame,
+                                                          thresholds: List[int],
+                                                          window: int,
+                                                          stat_column: str = 'PRA') -> Dict[int, np.ndarray]:
     """
     Calculate rolling percentage for ALL thresholds using VECTORIZED operations.
 
@@ -46,14 +196,15 @@ def calculate_rolling_percentage_all_thresholds_vectorized(df: pd.DataFrame, thr
     - Progress logging every 100 groups to maintain Modal heartbeat
 
     Args:
-        df: DataFrame with PRA, Player_ID, TEAM, SEASON_ID, GAME_DATE_PARSED
-        thresholds: List of PRA thresholds to calculate percentages for
+        df: DataFrame with stat column, Player_ID, TEAM, SEASON_ID, GAME_DATE_PARSED
+        thresholds: List of thresholds to calculate percentages for
         window: Rolling window size (5, 10, or 20)
+        stat_column: Column name for the stat (default: 'PRA')
 
     Returns:
         Dict mapping threshold -> numpy array of percentages
     """
-    logger.info(f"  Calculating last_{window}_pct for {len(thresholds)} thresholds (VECTORIZED)...")
+    logger.info(f"  Calculating last_{window}_pct for {len(thresholds)} thresholds using {stat_column} (VECTORIZED)...")
 
     # Sort once at the beginning
     df = df.sort_values(['Player_ID', 'TEAM', 'SEASON_ID', 'GAME_DATE_PARSED'])
@@ -74,8 +225,8 @@ def calculate_rolling_percentage_all_thresholds_vectorized(df: pd.DataFrame, thr
 
         # For each threshold, calculate rolling percentage (vectorized within group)
         for threshold in thresholds:
-            # Vectorized: Create boolean array where PRA >= threshold
-            met_threshold = (group_sorted['PRA'].values >= threshold).astype(float)
+            # Vectorized: Create boolean array where stat >= threshold
+            met_threshold = (group_sorted[stat_column].values >= threshold).astype(float)
 
             # Rolling sum and count using pandas (implemented in C, very fast)
             rolling_sum = pd.Series(met_threshold).rolling(window, min_periods=1).sum().shift(1).values
@@ -91,7 +242,9 @@ def calculate_rolling_percentage_all_thresholds_vectorized(df: pd.DataFrame, thr
     return threshold_results
 
 
-def calculate_season_percentage_all_thresholds_vectorized(df: pd.DataFrame, thresholds: List[int]) -> Dict[int, np.ndarray]:
+def calculate_season_percentage_all_thresholds_vectorized(df: pd.DataFrame,
+                                                         thresholds: List[int],
+                                                         stat_column: str = 'PRA') -> Dict[int, np.ndarray]:
     """
     Calculate season percentage for ALL thresholds using VECTORIZED operations.
 
@@ -103,13 +256,14 @@ def calculate_season_percentage_all_thresholds_vectorized(df: pd.DataFrame, thre
     - Progress logging every 100 groups
 
     Args:
-        df: DataFrame with PRA, Player_ID, TEAM, SEASON_ID, GAME_DATE_PARSED
-        thresholds: List of PRA thresholds
+        df: DataFrame with stat column, Player_ID, TEAM, SEASON_ID, GAME_DATE_PARSED
+        thresholds: List of thresholds
+        stat_column: Column name for the stat (default: 'PRA')
 
     Returns:
         Dict mapping threshold -> numpy array of percentages
     """
-    logger.info(f"  Calculating season_pct for {len(thresholds)} thresholds (VECTORIZED)...")
+    logger.info(f"  Calculating season_pct for {len(thresholds)} thresholds using {stat_column} (VECTORIZED)...")
 
     grouped = df.groupby(['Player_ID', 'TEAM'])
     total_groups = len(grouped)
@@ -131,8 +285,8 @@ def calculate_season_percentage_all_thresholds_vectorized(df: pd.DataFrame, thre
 
             # For each threshold, calculate expanding percentage
             for threshold in thresholds:
-                # Vectorized: Create boolean array where PRA >= threshold
-                met_threshold = (season_group['PRA'].values >= threshold).astype(float)
+                # Vectorized: Create boolean array where stat >= threshold
+                met_threshold = (season_group[stat_column].values >= threshold).astype(float)
 
                 # Expanding mean (excludes current game with shift(1))
                 expanding_sum = pd.Series(met_threshold).expanding().sum().shift(1).values
@@ -148,7 +302,9 @@ def calculate_season_percentage_all_thresholds_vectorized(df: pd.DataFrame, thre
     return threshold_results
 
 
-def calculate_last_season_percentage_all_thresholds_vectorized(df: pd.DataFrame, thresholds: List[int]) -> Dict[int, np.ndarray]:
+def calculate_last_season_percentage_all_thresholds_vectorized(df: pd.DataFrame,
+                                                              thresholds: List[int],
+                                                              stat_column: str = 'PRA') -> Dict[int, np.ndarray]:
     """
     Calculate last season percentage for ALL thresholds using VECTORIZED operations.
 
@@ -160,13 +316,14 @@ def calculate_last_season_percentage_all_thresholds_vectorized(df: pd.DataFrame,
     - Progress logging during calculation
 
     Args:
-        df: DataFrame with PRA, Player_ID, TEAM, SEASON_ID
-        thresholds: List of PRA thresholds
+        df: DataFrame with stat column, Player_ID, TEAM, SEASON_ID
+        thresholds: List of thresholds
+        stat_column: Column name for the stat (default: 'PRA')
 
     Returns:
         Dict mapping threshold -> numpy array of percentages
     """
-    logger.info(f"  Calculating last_season_pct for {len(thresholds)} thresholds (VECTORIZED)...")
+    logger.info(f"  Calculating last_season_pct for {len(thresholds)} thresholds using {stat_column} (VECTORIZED)...")
 
     # Initialize result dict with NaN arrays
     threshold_results = {t: np.full(len(df), np.nan) for t in thresholds}
@@ -181,7 +338,7 @@ def calculate_last_season_percentage_all_thresholds_vectorized(df: pd.DataFrame,
         # For each player-season, calculate % of games >= threshold
         # Note: Group by Player_ID and SEASON_ID only (not TEAM) to handle team changes
         season_stats = df.groupby(['Player_ID', 'SEASON_ID']).apply(
-            lambda x: (x['PRA'] >= threshold).mean()
+            lambda x: (x[stat_column] >= threshold).mean()
         ).reset_index()
         season_stats.columns = ['Player_ID', 'SEASON_ID', 'pct']
 
@@ -202,7 +359,9 @@ def calculate_last_season_percentage_all_thresholds_vectorized(df: pd.DataFrame,
     return threshold_results
 
 
-def calculate_lineup_percentage_all_thresholds_vectorized(df: pd.DataFrame, thresholds: List[int]) -> Dict[int, np.ndarray]:
+def calculate_lineup_percentage_all_thresholds_vectorized(df: pd.DataFrame,
+                                                         thresholds: List[int],
+                                                         stat_column: str = 'PRA') -> Dict[int, np.ndarray]:
     """
     Calculate lineup percentage for ALL thresholds using VECTORIZED operations.
 
@@ -215,13 +374,14 @@ def calculate_lineup_percentage_all_thresholds_vectorized(df: pd.DataFrame, thre
     - Progress logging every 500 groups
 
     Args:
-        df: DataFrame with PRA, Player_ID, TEAM, LINEUP_ID, GAME_DATE_PARSED
-        thresholds: List of PRA thresholds
+        df: DataFrame with stat column, Player_ID, TEAM, LINEUP_ID, GAME_DATE_PARSED
+        thresholds: List of thresholds
+        stat_column: Column name for the stat (default: 'PRA')
 
     Returns:
         Dict mapping threshold -> numpy array of percentages
     """
-    logger.info(f"  Calculating lineup_pct for {len(thresholds)} thresholds (VECTORIZED)...")
+    logger.info(f"  Calculating lineup_pct for {len(thresholds)} thresholds using {stat_column} (VECTORIZED)...")
 
     grouped = df.groupby(['Player_ID', 'TEAM', 'LINEUP_ID'])
     total_groups = len(grouped)
@@ -238,8 +398,8 @@ def calculate_lineup_percentage_all_thresholds_vectorized(df: pd.DataFrame, thre
 
         # For each threshold, calculate expanding percentage
         for threshold in thresholds:
-            # Vectorized: Create boolean array where PRA >= threshold
-            met_threshold = (group_sorted['PRA'].values >= threshold).astype(float)
+            # Vectorized: Create boolean array where stat >= threshold
+            met_threshold = (group_sorted[stat_column].values >= threshold).astype(float)
 
             # Expanding mean (excludes current game with shift(1))
             expanding_sum = pd.Series(met_threshold).expanding().sum().shift(1).values
@@ -272,29 +432,31 @@ def calculate_lineup_percentage_all_thresholds_vectorized(df: pd.DataFrame, thre
             pt_indices = pt_group.index.values
             pt_pct_values = threshold_results[threshold][pt_indices]
 
-            # Track first-lineup-game PRAs
-            first_lineup_pras = []
+            # Track first-lineup-game stats
+            first_lineup_stats = []
 
             for i, (idx, pct_val) in enumerate(zip(pt_indices, pt_pct_values)):
                 if np.isnan(pct_val):
                     # This is a first game with a new lineup
-                    if len(first_lineup_pras) > 0:
+                    if len(first_lineup_stats) > 0:
                         # Calculate percentage from previous first-lineup-games
-                        new_lineup_pct = np.mean([pra >= threshold for pra in first_lineup_pras])
+                        new_lineup_pct = np.mean([stat >= threshold for stat in first_lineup_stats])
                         threshold_results[threshold][idx] = new_lineup_pct
                     else:
                         # No previous first-lineup-games, use 0
                         threshold_results[threshold][idx] = 0.0
 
-                    # Add current game's PRA to the list for future first-lineup-games
-                    current_pra = pt_group.iloc[i]['PRA']
-                    first_lineup_pras.append(current_pra)
+                    # Add current game's stat to the list for future first-lineup-games
+                    current_stat = pt_group.iloc[i][stat_column]
+                    first_lineup_stats.append(current_stat)
 
     logger.info(f"    ✓ Completed lineup_pct for all thresholds")
     return threshold_results
 
 
-def calculate_h2h_percentage_all_thresholds_vectorized(df: pd.DataFrame, thresholds: List[int]) -> Dict[int, np.ndarray]:
+def calculate_h2h_percentage_all_thresholds_vectorized(df: pd.DataFrame,
+                                                      thresholds: List[int],
+                                                      stat_column: str = 'PRA') -> Dict[int, np.ndarray]:
     """
     Calculate H2H percentage for ALL thresholds using OPTIMIZED operations.
 
@@ -309,13 +471,14 @@ def calculate_h2h_percentage_all_thresholds_vectorized(df: pd.DataFrame, thresho
     - Progress logging every 500 groups
 
     Args:
-        df: DataFrame with PRA, Player_ID, OPPONENT, SEASON_ID, GAME_DATE_PARSED
-        thresholds: List of PRA thresholds
+        df: DataFrame with stat column, Player_ID, OPPONENT, SEASON_ID, GAME_DATE_PARSED
+        thresholds: List of thresholds
+        stat_column: Column name for the stat (default: 'PRA')
 
     Returns:
         Dict mapping threshold -> numpy array of percentages
     """
-    logger.info(f"  Calculating h2h_pct for {len(thresholds)} thresholds (VECTORIZED)...")
+    logger.info(f"  Calculating h2h_pct for {len(thresholds)} thresholds using {stat_column} (VECTORIZED)...")
 
     grouped = df.groupby(['Player_ID', 'OPPONENT'])
     total_groups = len(grouped)
@@ -343,7 +506,7 @@ def calculate_h2h_percentage_all_thresholds_vectorized(df: pd.DataFrame, thresho
             if len(prev_games) > 0:
                 # Calculate percentages for all thresholds at once (VECTORIZED)
                 for threshold in thresholds:
-                    pct = (prev_games['PRA'] >= threshold).mean()
+                    pct = (prev_games[stat_column] >= threshold).mean()
                     threshold_results[threshold][original_indices[row_pos]] = pct
             else:
                 # No previous h2h games, use 0 instead of NaN
@@ -354,34 +517,72 @@ def calculate_h2h_percentage_all_thresholds_vectorized(df: pd.DataFrame, thresho
     return threshold_results
 
 
-def run_phase_2_5(s3_handler, threshold_start=10, threshold_end=51) -> Tuple[bool, dict]:
+def run_phase_2_5(s3_handler,
+                  stat_type: str = 'PRA',
+                  threshold_start: Optional[int] = None,
+                  threshold_end: Optional[int] = None,
+                  mode: str = 'auto') -> Tuple[bool, dict]:
     """
     Execute Phase 2.5: Pre-calculate ALL percentage columns for all thresholds (OPTIMIZED).
 
     This dramatically speeds up Phase 3 by doing all percentage calculations once.
+    Supports multiple stat types and incremental processing.
 
     OPTIMIZATIONS:
     - 100% vectorized operations (NO iterrows())
     - Progress logging every 100-500 groups
-    - Expected runtime: 40-60 minutes (vs 6-8 hours with old approach)
+    - Expected runtime: 40-60 minutes for full mode (vs 6-8 hours with old approach)
+    - Incremental mode: 95% faster for daily updates
 
     Args:
         s3_handler: S3Handler instance
-        threshold_start: Starting threshold (default: 10)
-        threshold_end: Ending threshold (default: 51)
+        stat_type: Stat type to process ('PRA', 'PA', 'PR', or 'RA')
+        threshold_start: Starting threshold (if None, uses default for stat_type)
+        threshold_end: Ending threshold (if None, uses default for stat_type)
+        mode: Processing mode - 'full', 'incremental', or 'auto'
+              'auto' = use incremental if metadata exists, else full
 
     Returns:
         Tuple of (success: bool, stats: dict)
     """
     logger.info("=" * 80)
-    logger.info("PHASE 2.5: PRE-CALCULATE ALL PERCENTAGE COLUMNS (OPTIMIZED)")
+    logger.info(f"PHASE 2.5: PRE-CALCULATE ALL PERCENTAGE COLUMNS FOR {stat_type} (OPTIMIZED)")
     logger.info("=" * 80)
 
     try:
         from s3_utils import S3_PLAYER_BUCKET
 
+        # Validate stat type
+        if stat_type not in STAT_TYPE_THRESHOLDS:
+            raise ValueError(f"Invalid stat_type: {stat_type}. Must be one of {list(STAT_TYPE_THRESHOLDS.keys())}")
+
+        # Use default thresholds if not specified
+        if threshold_start is None or threshold_end is None:
+            default_start, default_end = STAT_TYPE_THRESHOLDS[stat_type]
+            threshold_start = threshold_start if threshold_start is not None else default_start
+            threshold_end = threshold_end if threshold_end is not None else default_end
+            logger.info(f"Using default thresholds for {stat_type}: {threshold_start}-{threshold_end}")
+
+        # Determine processing mode
+        metadata = None
+        actual_mode = mode
+
+        if mode == 'auto':
+            metadata = load_metadata(s3_handler, S3_PLAYER_BUCKET, stat_type)
+            actual_mode = 'incremental' if metadata else 'full'
+            logger.info(f"Auto mode: Selected '{actual_mode}' mode based on metadata existence")
+        elif mode == 'incremental':
+            metadata = load_metadata(s3_handler, S3_PLAYER_BUCKET, stat_type)
+            if not metadata:
+                logger.warning("Incremental mode requested but no metadata found. Switching to full mode.")
+                actual_mode = 'full'
+
+        logger.info(f"Processing mode: {actual_mode.upper()}")
+        logger.info(f"Stat type: {stat_type}")
+        logger.info(f"Thresholds: {threshold_start} to {threshold_end}")
+
         # Step 1: Download processed data from Phase 2
-        logger.info("Step 1: Downloading processed data from Phase 2...")
+        logger.info("\nStep 1: Downloading processed data from Phase 2...")
         df = s3_handler.download_dataframe(
             S3_PLAYER_BUCKET,
             'processed_data/processed_model_data.csv'
@@ -398,50 +599,117 @@ def run_phase_2_5(s3_handler, threshold_start=10, threshold_end=51) -> Tuple[boo
             logger.info("  Parsing game dates...")
             df['GAME_DATE_PARSED'] = pd.to_datetime(df['GAME_DATE'], format='%b %d, %Y')
 
-        # Step 2: Calculate percentage columns for all thresholds (VECTORIZED)
+        # Ensure stat column exists
+        if stat_type not in df.columns:
+            logger.error(f"Stat column '{stat_type}' not found in data")
+            return False, {'error': f"Stat column '{stat_type}' not found"}
+
+        # Define thresholds
         thresholds = list(range(threshold_start, threshold_end + 1))
-        logger.info(f"\nStep 2: Calculating percentage columns for {len(thresholds)} thresholds (VECTORIZED)...")
-        logger.info(f"  Thresholds: {threshold_start} to {threshold_end}")
 
-        # Calculate rolling percentages (windows: 5, 10, 20)
-        logger.info("\n[1/7] Calculating rolling percentages...")
-        for window in [5, 10, 20]:
-            results = calculate_rolling_percentage_all_thresholds_vectorized(df, thresholds, window)
-            for threshold, pct_array in results.items():
-                df[f'last_{window}_pct_{threshold}'] = pct_array
-            logger.info(f"  ✓ Added last_{window}_pct columns for all thresholds")
+        # Initialize variables for stats
+        start_time = datetime.now()
+        rows_processed = 0
 
-        # Calculate season percentages
-        logger.info("\n[2/7] Calculating season percentages...")
-        season_results = calculate_season_percentage_all_thresholds_vectorized(df, thresholds)
-        for threshold, pct_array in season_results.items():
-            df[f'season_pct_{threshold}'] = pct_array
-        logger.info(f"  ✓ Added season_pct columns for all thresholds")
+        if actual_mode == 'incremental' and metadata:
+            # INCREMENTAL MODE
+            logger.info("\n=== INCREMENTAL MODE ===")
 
-        # Calculate last season percentages
-        logger.info("\n[3/7] Calculating last season percentages...")
-        last_season_results = calculate_last_season_percentage_all_thresholds_vectorized(df, thresholds)
-        for threshold, pct_array in last_season_results.items():
-            df[f'last_season_pct_{threshold}'] = pct_array
-        logger.info(f"  ✓ Added last_season_pct columns for all thresholds")
+            # Load existing processed data
+            output_key = f'processed_data/processed_with_{stat_type.lower()}_pct_{threshold_start}-{threshold_end}.csv'
+            logger.info(f"Loading existing processed data from {output_key}...")
 
-        # Calculate lineup percentages
-        logger.info("\n[4/7] Calculating lineup percentages...")
-        lineup_results = calculate_lineup_percentage_all_thresholds_vectorized(df, thresholds)
-        for threshold, pct_array in lineup_results.items():
-            df[f'lineup_pct_{threshold}'] = pct_array
-        logger.info(f"  ✓ Added lineup_pct columns for all thresholds")
+            df_existing = s3_handler.download_dataframe(S3_PLAYER_BUCKET, output_key)
+            if df_existing is None:
+                logger.warning("Could not load existing processed data. Switching to full mode.")
+                actual_mode = 'full'
+            else:
+                logger.info(f"Loaded {len(df_existing):,} existing rows")
 
-        # Calculate h2h percentages
-        logger.info("\n[5/7] Calculating H2H percentages...")
-        h2h_results = calculate_h2h_percentage_all_thresholds_vectorized(df, thresholds)
-        for threshold, pct_array in h2h_results.items():
-            df[f'h2h_pct_{threshold}'] = pct_array
-        logger.info(f"  ✓ Added h2h_pct columns for all thresholds")
+                # Get new games since last processed date
+                last_processed_date = metadata.get('last_processed_date')
+                df_new = get_new_games(df, last_processed_date)
 
-        # Step 3: Save to S3
-        logger.info("\n[6/7] Saving pre-calculated data to S3...")
-        output_key = f'processed_data/processed_with_all_pct_{threshold_start}-{threshold_end}.csv'
+                if len(df_new) == 0:
+                    logger.info("No new games to process. Data is up to date!")
+                    return True, {
+                        'total_rows': len(df_existing),
+                        'new_rows': 0,
+                        'mode': 'incremental',
+                        'stat_type': stat_type,
+                        'message': 'No new games to process'
+                    }
+
+                # Calculate percentages for new games with historical context
+                df_new_processed = calculate_percentages_incremental(
+                    df_existing, df_new, thresholds, stat_type
+                )
+
+                # Combine existing and new data
+                df_final = pd.concat([df_existing, df_new_processed], ignore_index=True)
+                df_final = df_final.sort_values(['Player_ID', 'TEAM', 'SEASON_ID', 'GAME_DATE_PARSED'])
+
+                rows_processed = len(df_new_processed)
+                df = df_final  # For saving step
+
+        if actual_mode == 'full':
+            # FULL MODE (existing behavior with stat_column support)
+            logger.info("\n=== FULL MODE ===")
+            logger.info(f"\nStep 2: Calculating percentage columns for {len(thresholds)} thresholds (VECTORIZED)...")
+            logger.info(f"  Thresholds: {threshold_start} to {threshold_end}")
+            logger.info(f"  Stat column: {stat_type}")
+
+            # Calculate rolling percentages (windows: 5, 10, 20)
+            logger.info("\n[1/7] Calculating rolling percentages...")
+            for window in [5, 10, 20]:
+                results = calculate_rolling_percentage_all_thresholds_vectorized(
+                    df, thresholds, window, stat_type
+                )
+                for threshold, pct_array in results.items():
+                    df[f'last_{window}_pct_{threshold}'] = pct_array
+                logger.info(f"  ✓ Added last_{window}_pct columns for all thresholds")
+
+            # Calculate season percentages
+            logger.info("\n[2/7] Calculating season percentages...")
+            season_results = calculate_season_percentage_all_thresholds_vectorized(
+                df, thresholds, stat_type
+            )
+            for threshold, pct_array in season_results.items():
+                df[f'season_pct_{threshold}'] = pct_array
+            logger.info(f"  ✓ Added season_pct columns for all thresholds")
+
+            # Calculate last season percentages
+            logger.info("\n[3/7] Calculating last season percentages...")
+            last_season_results = calculate_last_season_percentage_all_thresholds_vectorized(
+                df, thresholds, stat_type
+            )
+            for threshold, pct_array in last_season_results.items():
+                df[f'last_season_pct_{threshold}'] = pct_array
+            logger.info(f"  ✓ Added last_season_pct columns for all thresholds")
+
+            # Calculate lineup percentages
+            logger.info("\n[4/7] Calculating lineup percentages...")
+            lineup_results = calculate_lineup_percentage_all_thresholds_vectorized(
+                df, thresholds, stat_type
+            )
+            for threshold, pct_array in lineup_results.items():
+                df[f'lineup_pct_{threshold}'] = pct_array
+            logger.info(f"  ✓ Added lineup_pct columns for all thresholds")
+
+            # Calculate h2h percentages
+            logger.info("\n[5/7] Calculating H2H percentages...")
+            h2h_results = calculate_h2h_percentage_all_thresholds_vectorized(
+                df, thresholds, stat_type
+            )
+            for threshold, pct_array in h2h_results.items():
+                df[f'h2h_pct_{threshold}'] = pct_array
+            logger.info(f"  ✓ Added h2h_pct columns for all thresholds")
+
+            rows_processed = len(df)
+
+        # Step 3: Save to S3 with stat type in filename
+        logger.info(f"\n[6/7] Saving pre-calculated data to S3...")
+        output_key = f'processed_data/processed_with_{stat_type.lower()}_pct_{threshold_start}-{threshold_end}.csv'
 
         # Calculate file size before upload
         file_size_mb = df.memory_usage(deep=True).sum() / 1024 / 1024
@@ -450,26 +718,58 @@ def run_phase_2_5(s3_handler, threshold_start=10, threshold_end=51) -> Tuple[boo
         logger.info(f"✓ Saved to s3://{S3_PLAYER_BUCKET}/{output_key}")
         logger.info(f"  File size: {file_size_mb:.1f} MB")
 
+        # Save metadata
+        max_date = df['GAME_DATE_PARSED'].max()
+        new_metadata = {
+            'last_processed_date': max_date.strftime('%Y-%m-%d'),
+            'total_games': len(df),
+            'stat_type': stat_type,
+            'threshold_start': threshold_start,
+            'threshold_end': threshold_end,
+            'mode': actual_mode,
+            'processed_at': datetime.now().isoformat()
+        }
+        save_metadata(s3_handler, S3_PLAYER_BUCKET, stat_type, new_metadata)
+
+        # Calculate processing time
+        end_time = datetime.now()
+        processing_time = (end_time - start_time).total_seconds()
+
         # Generate stats
         stats = {
             'total_rows': len(df),
+            'rows_processed': rows_processed,
             'total_columns': len(df.columns),
+            'stat_type': stat_type,
             'thresholds': f"{threshold_start}-{threshold_end}",
             'num_thresholds': len(thresholds),
             'columns_added': len(thresholds) * 7,  # 7 percentage types per threshold
-            'file_size_mb': round(file_size_mb, 2)
+            'file_size_mb': round(file_size_mb, 2),
+            'mode': actual_mode,
+            'processing_time_seconds': round(processing_time, 2)
         }
 
+        if actual_mode == 'incremental':
+            stats['time_saved_pct'] = round((1 - rows_processed / len(df)) * 100, 1)
+
         logger.info("\n[7/7] " + "=" * 80)
-        logger.info("PHASE 2.5 SUMMARY")
+        logger.info(f"PHASE 2.5 SUMMARY ({stat_type})")
         logger.info("=" * 80)
+        logger.info(f"Mode: {actual_mode.upper()}")
+        logger.info(f"Stat type: {stat_type}")
         logger.info(f"Total rows: {stats['total_rows']:,}")
+        logger.info(f"Rows processed: {stats['rows_processed']:,}")
         logger.info(f"Total columns: {stats['total_columns']}")
         logger.info(f"Thresholds: {stats['thresholds']}")
         logger.info(f"Percentage columns added: {stats['columns_added']}")
         logger.info(f"File size: {stats['file_size_mb']} MB")
+        logger.info(f"Processing time: {stats['processing_time_seconds']} seconds")
+
+        if actual_mode == 'incremental':
+            logger.info(f"Time saved: {stats['time_saved_pct']}%")
+
         logger.info("=" * 80)
-        logger.info("✓ PHASE 2.5 COMPLETED SUCCESSFULLY")
+        logger.info(f"✓ PHASE 2.5 COMPLETED SUCCESSFULLY FOR {stat_type}")
         logger.info("=" * 80)
 
         return True, stats
@@ -483,19 +783,37 @@ def run_phase_2_5(s3_handler, threshold_start=10, threshold_end=51) -> Tuple[boo
 
 if __name__ == '__main__':
     # For local testing
+    import argparse
+
     logging.basicConfig(
         level=logging.INFO,
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
     )
 
+    parser = argparse.ArgumentParser(description='Phase 2.5: Pre-calculate percentages')
+    parser.add_argument('--stat-type', default='PRA', choices=['PRA', 'PA', 'PR', 'RA'],
+                       help='Stat type to process (default: PRA)')
+    parser.add_argument('--threshold-start', type=int, help='Starting threshold')
+    parser.add_argument('--threshold-end', type=int, help='Ending threshold')
+    parser.add_argument('--mode', default='auto', choices=['auto', 'full', 'incremental'],
+                       help='Processing mode (default: auto)')
+
+    args = parser.parse_args()
+
     from s3_utils import S3Handler
 
     s3_handler = S3Handler()
-    success, stats = run_phase_2_5(s3_handler)
+    success, stats = run_phase_2_5(
+        s3_handler,
+        stat_type=args.stat_type,
+        threshold_start=args.threshold_start,
+        threshold_end=args.threshold_end,
+        mode=args.mode
+    )
 
     if success:
-        print("\n✓ Phase 2.5 completed successfully!")
+        print(f"\n✓ Phase 2.5 completed successfully for {args.stat_type}!")
         print(f"Stats: {stats}")
     else:
-        print("\n✗ Phase 2.5 failed!")
+        print(f"\n✗ Phase 2.5 failed for {args.stat_type}!")
         print(f"Error: {stats.get('error')}")

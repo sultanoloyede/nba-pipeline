@@ -22,12 +22,13 @@ from sklearn.model_selection import train_test_split
 from sklearn.metrics import confusion_matrix
 import pickle
 from typing import Tuple, Dict
+from datetime import datetime
 
 # Setup logger
 logger = logging.getLogger(__name__)
 
 
-def train_model_for_threshold(df_all: pd.DataFrame, threshold: int) -> Tuple[xgb.XGBClassifier, float, Dict]:
+def train_model_for_threshold(df_all: pd.DataFrame, threshold: int, stat_type: str = 'PRA') -> Tuple[xgb.XGBClassifier, float, Dict]:
     """
     Train XGBoost model for specific threshold.
 
@@ -35,17 +36,18 @@ def train_model_for_threshold(df_all: pd.DataFrame, threshold: int) -> Tuple[xgb
 
     Args:
         df_all: Comprehensive DataFrame with all percentage columns
-        threshold: PRA threshold for binary classification
+        threshold: Threshold for binary classification
+        stat_type: Type of stat to predict ('PRA', 'PA', 'PR', or 'RA')
 
     Returns:
         Tuple of (model, precision, metrics_dict)
     """
     logger.info(f"\n{'='*80}")
-    logger.info(f"Training model for {threshold}+ PRA")
+    logger.info(f"Training model for {threshold}+ {stat_type}")
     logger.info(f"{'='*80}")
 
     # Step 1: Create target variable
-    y = (df_all['PRA'] >= threshold).astype(int)
+    y = (df_all[stat_type] >= threshold).astype(int)
     logger.info(f"  Target distribution: {y.value_counts().to_dict()}")
 
     # Step 2: Select features for this threshold
@@ -118,6 +120,7 @@ def train_model_for_threshold(df_all: pd.DataFrame, threshold: int) -> Tuple[xgb
 
     metrics = {
         'threshold': threshold,
+        'stat_type': stat_type,
         'precision': precision,
         'accuracy': accuracy,
         'tp': int(tp),
@@ -129,20 +132,23 @@ def train_model_for_threshold(df_all: pd.DataFrame, threshold: int) -> Tuple[xgb
         'n_features': X.shape[1]
     }
 
-    logger.info(f"  {threshold}+ PRA: Precision = {precision:.4f}")
+    logger.info(f"  {threshold}+ {stat_type}: Precision = {precision:.4f}")
     logger.info(f"  Accuracy = {accuracy:.4f}")
     logger.info(f"  TP: {tp}, FP: {fp}, TN: {tn}, FN: {fn}")
 
     return model, precision, metrics
 
 
-def run_phase_3_optimized(s3_handler, threshold_start: int = 10, threshold_end: int = 51) -> Tuple[bool, Dict]:
+def run_phase_3_optimized(s3_handler,
+                          stat_type: str = 'PRA',
+                          threshold_start: int = 10,
+                          threshold_end: int = 51) -> Tuple[bool, Dict]:
     """
     Execute Phase 3 (OPTIMIZED): Model Training using pre-calculated percentages.
 
     This is the OPTIMIZED implementation that:
     1. Downloads comprehensive file ONCE
-    2. Reuses DataFrame for all 42 models
+    2. Reuses DataFrame for all models
     3. Trains models sequentially (one threshold at a time)
     4. Saves each model to S3 immediately
 
@@ -151,6 +157,7 @@ def run_phase_3_optimized(s3_handler, threshold_start: int = 10, threshold_end: 
 
     Args:
         s3_handler: S3Handler instance
+        stat_type: Type of stat to predict ('PRA', 'PA', 'PR', or 'RA')
         threshold_start: Starting threshold (default: 10)
         threshold_end: Ending threshold (default: 51)
 
@@ -158,8 +165,9 @@ def run_phase_3_optimized(s3_handler, threshold_start: int = 10, threshold_end: 
         Tuple of (success: bool, stats: dict)
     """
     logger.info("=" * 80)
-    logger.info("PHASE 3 (OPTIMIZED): FAST MODEL TRAINING")
+    logger.info(f"PHASE 3: TRAIN {stat_type} MODELS (OPTIMIZED)")
     logger.info("=" * 80)
+    logger.info(f"Stat type: {stat_type}")
     logger.info(f"Threshold range: {threshold_start}-{threshold_end}")
     logger.info(f"Total models to train: {threshold_end - threshold_start + 1}")
     logger.info("=" * 80)
@@ -172,7 +180,7 @@ def run_phase_3_optimized(s3_handler, threshold_start: int = 10, threshold_end: 
         # ============================================================================
         logger.info("\nSTEP 1: Loading comprehensive data with all percentage columns...")
 
-        data_key = f'processed_data/processed_with_all_pct_{threshold_start}-{threshold_end}.csv'
+        data_key = f'processed_data/processed_with_{stat_type.lower()}_pct_{threshold_start}-{threshold_end}.csv'
         logger.info(f"  Downloading: s3://{S3_PLAYER_BUCKET}/{data_key}")
 
         df_all = s3_handler.download_dataframe(S3_PLAYER_BUCKET, data_key)
@@ -207,7 +215,7 @@ def run_phase_3_optimized(s3_handler, threshold_start: int = 10, threshold_end: 
             logger.info(f"  DEBUG: {lineup_col} - NaN count: {df_all[lineup_col].isna().sum()}, Non-zero count: {(df_all[lineup_col] != 0).sum()}")
 
         # Verify required columns exist
-        required_base_cols = ['PRA', 'last_5_avg', 'last_10_avg', 'last_20_avg', 'season_avg']
+        required_base_cols = [stat_type, 'last_5_avg', 'last_10_avg', 'last_20_avg', 'season_avg']
         missing_cols = [col for col in required_base_cols if col not in df_all.columns]
         if missing_cols:
             error_msg = f"Missing required columns: {missing_cols}"
@@ -225,11 +233,14 @@ def run_phase_3_optimized(s3_handler, threshold_start: int = 10, threshold_end: 
 
         for threshold in range(threshold_start, threshold_end + 1):
             # Train model for this threshold
-            model, precision, metrics = train_model_for_threshold(df_all, threshold)
+            model, precision, metrics = train_model_for_threshold(df_all, threshold, stat_type)
 
             # Save model to S3
             logger.info(f"  Saving model to S3...")
-            model_filename = f'xgb_pra_{threshold}plus_precision_{precision:.4f}.pkl'
+
+            # Generate timestamp for unique naming
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            model_filename = f'xgb_{stat_type.lower()}_{threshold}plus_{timestamp}.pkl'
             model_key = f'models/{model_filename}'
 
             # Serialize model
@@ -255,8 +266,9 @@ def run_phase_3_optimized(s3_handler, threshold_start: int = 10, threshold_end: 
         # STEP 3: Generate Summary
         # ============================================================================
         logger.info("\n" + "=" * 80)
-        logger.info("PHASE 3 (OPTIMIZED) - SUMMARY")
+        logger.info(f"PHASE 3: {stat_type} MODELS - SUMMARY")
         logger.info("=" * 80)
+        logger.info(f"Stat type: {stat_type}")
         logger.info(f"Models trained: {len(model_results)}")
         logger.info(f"Threshold range: {threshold_start}-{threshold_end}")
         logger.info("")
@@ -268,7 +280,7 @@ def run_phase_3_optimized(s3_handler, threshold_start: int = 10, threshold_end: 
             precision = metrics['precision']
             accuracy = metrics['accuracy']
             logger.info(
-                f"  {threshold:2d}+ PRA: "
+                f"  {threshold:2d}+ {stat_type}: "
                 f"Precision={precision:.4f}, "
                 f"Accuracy={accuracy:.4f}, "
                 f"Features={metrics['n_features']}"
@@ -284,6 +296,7 @@ def run_phase_3_optimized(s3_handler, threshold_start: int = 10, threshold_end: 
         logger.info("=" * 80)
 
         stats = {
+            'stat_type': stat_type,
             'total_models': len(model_results),
             'threshold_range': f"{threshold_start}-{threshold_end}",
             'avg_precision': avg_precision,
@@ -296,30 +309,79 @@ def run_phase_3_optimized(s3_handler, threshold_start: int = 10, threshold_end: 
         return True, stats
 
     except Exception as e:
-        logger.error(f"Phase 3 (Optimized) failed with error: {e}")
+        logger.error(f"Phase 3 ({stat_type}) failed with error: {e}")
         import traceback
         traceback.print_exc()
         return False, {'error': str(e)}
 
 
 if __name__ == '__main__':
-    # For local testing
+    import argparse
+    import sys
+    from s3_utils import S3Handler
+    from dotenv import load_dotenv
+
+    load_dotenv()
+
+    # Setup logging
     logging.basicConfig(
         level=logging.INFO,
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
     )
 
-    from s3_utils import S3Handler
+    # Parse command-line arguments
+    parser = argparse.ArgumentParser(description='Train NBA prop models for various stat types')
+    parser.add_argument('--stat-type', type=str, default='PRA',
+                        choices=['PRA', 'PA', 'PR', 'RA'],
+                        help='Stat type to train models for (default: PRA)')
+    parser.add_argument('--threshold-start', type=int, default=None,
+                        help='Starting threshold (default: auto based on stat type)')
+    parser.add_argument('--threshold-end', type=int, default=None,
+                        help='Ending threshold (default: auto based on stat type)')
 
+    args = parser.parse_args()
+
+    # Define default thresholds for each stat type
+    stat_thresholds = {
+        'PRA': (10, 51),  # 42 models
+        'PA': (8, 41),    # 34 models
+        'PR': (8, 41),    # 34 models
+        'RA': (5, 26)     # 22 models
+    }
+
+    # Set threshold values (use provided or defaults)
+    threshold_start = args.threshold_start or stat_thresholds[args.stat_type][0]
+    threshold_end = args.threshold_end or stat_thresholds[args.stat_type][1]
+
+    # Initialize S3 handler
     s3_handler = S3Handler()
 
-    # Test with limited range first
-    print("\nTesting with limited range (10-51)...")
-    success, stats = run_phase_3_optimized(s3_handler, threshold_start=10, threshold_end=51)
+    # Log the configuration
+    print("\n" + "=" * 80)
+    print(f"Phase 3 Configuration:")
+    print(f"  Stat Type: {args.stat_type}")
+    print(f"  Threshold Range: {threshold_start} to {threshold_end}")
+    print(f"  Total Models: {threshold_end - threshold_start + 1}")
+    print("=" * 80)
+
+    # Run Phase 3
+    success, stats = run_phase_3_optimized(
+        s3_handler,
+        stat_type=args.stat_type,
+        threshold_start=threshold_start,
+        threshold_end=threshold_end
+    )
 
     if success:
-        print("\n✓ Phase 3 (Optimized) completed successfully!")
-        print(f"Stats: {stats}")
+        print("\n✓ Phase 3 completed successfully!")
+        print(f"Summary:")
+        print(f"  Stat Type: {stats['stat_type']}")
+        print(f"  Models Trained: {stats['total_models']}")
+        print(f"  Average Precision: {stats['avg_precision']:.4f}")
+        print(f"  Average Accuracy: {stats['avg_accuracy']:.4f}")
     else:
-        print("\n✗ Phase 3 (Optimized) failed!")
+        print("\n✗ Phase 3 failed!")
         print(f"Error: {stats.get('error')}")
+
+    # Exit with appropriate code
+    sys.exit(0 if success else 1)
