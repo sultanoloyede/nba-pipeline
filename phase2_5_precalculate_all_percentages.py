@@ -594,10 +594,14 @@ def run_phase_2_5(s3_handler,
 
         logger.info(f"✓ Downloaded processed data: {len(df):,} rows")
 
-        # Ensure GAME_DATE_PARSED exists
+        # Ensure GAME_DATE_PARSED exists and is datetime type
         if 'GAME_DATE_PARSED' not in df.columns:
             logger.info("  Parsing game dates...")
             df['GAME_DATE_PARSED'] = pd.to_datetime(df['GAME_DATE'], format='%b %d, %Y')
+        else:
+            # Ensure it's datetime type (could be string if loaded from CSV)
+            logger.info("  Converting GAME_DATE_PARSED to datetime...")
+            df['GAME_DATE_PARSED'] = pd.to_datetime(df['GAME_DATE_PARSED'])
 
         # Ensure stat column exists
         if stat_type not in df.columns:
