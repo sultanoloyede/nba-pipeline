@@ -200,6 +200,10 @@ def recalculate_base_features_for_stat_type(df: pd.DataFrame, stat_column: str) 
     """
     logger.info(f"Recalculating base features using {stat_column}...")
 
+    # IMPORTANT: Reset index to ensure we can track rows through multiple sorts
+    df = df.reset_index(drop=True)
+    df['_original_index'] = df.index
+
     # Sort for rolling calculations
     df = df.sort_values(['Player_ID', 'TEAM', 'SEASON_ID', 'GAME_DATE_PARSED'])
 
@@ -208,12 +212,16 @@ def recalculate_base_features_for_stat_type(df: pd.DataFrame, stat_column: str) 
     grouped = df.groupby(['Player_ID', 'TEAM', 'SEASON_ID'], group_keys=False)
 
     def rolling_for_group(group):
+        group = group.copy()  # Ensure we don't modify original
         group['last_5_avg'] = group[stat_column].rolling(5, min_periods=1).mean().shift(1)
         group['last_10_avg'] = group[stat_column].rolling(10, min_periods=1).mean().shift(1)
         group['last_20_avg'] = group[stat_column].rolling(20, min_periods=1).mean().shift(1)
         return group
 
     df = grouped.apply(rolling_for_group)
+    # Restore original index order after rolling calculation
+    df = df.set_index('_original_index').sort_index().reset_index(drop=True)
+    df['_original_index'] = df.index
 
     # 2. Season average (current season, excluding current game)
     logger.info(f"  Recalculating season average for {stat_column}...")
@@ -239,6 +247,9 @@ def recalculate_base_features_for_stat_type(df: pd.DataFrame, stat_column: str) 
     df['lineup_average'] = df.groupby(['Player_ID', 'TEAM', 'LINEUP_ID'])[stat_column].transform(
         lambda x: x.expanding().mean().shift(1)
     )
+    # Restore original index order after lineup calculation
+    df = df.set_index('_original_index').sort_index().reset_index(drop=True)
+    df['_original_index'] = df.index
 
     # For first game with lineup, use average from previous first-lineup-games
     mask = df['lineup_average'].isna()
@@ -247,6 +258,7 @@ def recalculate_base_features_for_stat_type(df: pd.DataFrame, stat_column: str) 
         df = df.sort_values(['Player_ID', 'TEAM', 'GAME_DATE_PARSED'])
 
         def calc_new_lineup_avg(group):
+            group = group.copy()  # Ensure we don't modify original
             first_game_stats = []
             new_lineup_avgs = []
 
@@ -266,6 +278,9 @@ def recalculate_base_features_for_stat_type(df: pd.DataFrame, stat_column: str) 
         df = df.groupby(['Player_ID', 'TEAM'], group_keys=False).apply(calc_new_lineup_avg)
         df.loc[mask, 'lineup_average'] = df.loc[mask, 'new_lineup_avg']
         df = df.drop('new_lineup_avg', axis=1)
+        # Restore original index order after new lineup calculation
+        df = df.set_index('_original_index').sort_index().reset_index(drop=True)
+        df['_original_index'] = df.index
 
     df['lineup_average'] = df['lineup_average'].fillna(0.0)
 
@@ -273,13 +288,14 @@ def recalculate_base_features_for_stat_type(df: pd.DataFrame, stat_column: str) 
     logger.info(f"  Recalculating H2H average for {stat_column}...")
     df = df.sort_values(['Player_ID', 'OPPONENT', 'SEASON_ID', 'GAME_DATE_PARSED'])
 
-    h2h_avgs = []
+    h2h_avgs_dict = {}  # Store by original index instead of appending to list
     grouped_h2h = df.groupby(['Player_ID', 'OPPONENT'])
 
     for (player_id, opponent), group in grouped_h2h:
-        group_sorted = group.sort_values(['SEASON_ID', 'GAME_DATE_PARSED']).reset_index(drop=True)
+        group_sorted = group.sort_values(['SEASON_ID', 'GAME_DATE_PARSED']).reset_index(drop=False)
+        original_indices = group_sorted.index.tolist()  # Get original indices
 
-        for row_pos in range(len(group_sorted)):
+        for i, row_pos in enumerate(range(len(group_sorted))):
             row = group_sorted.iloc[row_pos]
             current_season = row['SEASON_ID']
             target_seasons = [current_season, current_season - 1, current_season - 2]
@@ -288,17 +304,23 @@ def recalculate_base_features_for_stat_type(df: pd.DataFrame, stat_column: str) 
             prev_games = prev_games[prev_games['SEASON_ID'].isin(target_seasons)]
 
             if len(prev_games) > 0:
-                h2h_avgs.append(prev_games[stat_column].mean())
+                h2h_avgs_dict[original_indices[i]] = prev_games[stat_column].mean()
             else:
-                h2h_avgs.append(0.0)
+                h2h_avgs_dict[original_indices[i]] = 0.0
 
-    df['h2h_avg'] = h2h_avgs
+    # Assign h2h_avg by matching original index
+    df['h2h_avg'] = df.index.map(h2h_avgs_dict).fillna(0.0)
+
+    # Restore original index order after h2h calculation
+    df = df.set_index('_original_index').sort_index().reset_index(drop=True)
+    df['_original_index'] = df.index
 
     # 6. Opponent strength
     logger.info(f"  Recalculating opponent strength for {stat_column}...")
     df = df.sort_values(['OPPONENT', 'SEASON_ID', 'GAME_DATE_PARSED'])
 
     def opp_strength_for_season(group):
+        group = group.copy()  # Ensure we don't modify original
         group = group.sort_values('GAME_DATE_PARSED')
         group['went_under'] = (group[stat_column] < np.floor(group['last_5_avg'])).astype(float)
         group['went_under'] = group['went_under'].fillna(0.0)
@@ -306,7 +328,7 @@ def recalculate_base_features_for_stat_type(df: pd.DataFrame, stat_column: str) 
         group = group.drop('went_under', axis=1)
         return group
 
-    grouped_opp = df.groupby(['OPPONENT', 'SEASON_ID'])
+    grouped_opp = df.groupby(['OPPONENT', 'SEASON_ID'], group_keys=False)
     results = []
     for i, (name, group) in enumerate(grouped_opp):
         if i % 100 == 0 and i > 0:
@@ -315,6 +337,13 @@ def recalculate_base_features_for_stat_type(df: pd.DataFrame, stat_column: str) 
 
     df = pd.concat(results)
     df['opp_strength'] = df['opp_strength'].fillna(0.0)
+
+    # Restore original index order after opponent strength calculation
+    df = df.set_index('_original_index').sort_index().reset_index(drop=True)
+
+    # Remove the temporary index tracking column
+    if '_original_index' in df.columns:
+        df = df.drop('_original_index', axis=1)
 
     logger.info(f"✓ Recalculated all base features for {stat_column}")
     return df
