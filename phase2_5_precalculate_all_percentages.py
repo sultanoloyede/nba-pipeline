@@ -770,6 +770,10 @@ def run_phase_2_5(s3_handler,
             else:
                 logger.info(f"Loaded {len(df_existing):,} existing rows")
 
+                # Ensure GAME_DATE_PARSED is datetime type for existing data
+                if 'GAME_DATE_PARSED' in df_existing.columns:
+                    df_existing['GAME_DATE_PARSED'] = pd.to_datetime(df_existing['GAME_DATE_PARSED'])
+
                 # Get new games since last processed date
                 last_processed_date = metadata.get('last_processed_date')
                 df_new = get_new_games(df, last_processed_date)
