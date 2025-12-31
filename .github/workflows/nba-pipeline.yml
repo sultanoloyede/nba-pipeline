@@ -16,6 +16,15 @@ on:
         required: true
         default: 'all'
         type: string
+      mode:
+        description: 'Phase 2.5 mode: auto (default), full (fresh run), or incremental'
+        required: false
+        default: 'auto'
+        type: choice
+        options:
+          - auto
+          - full
+          - incremental
 
 env:
   PYTHON_VERSION: '3.11'
@@ -73,7 +82,9 @@ jobs:
           S3_LINEUP_BUCKET: ${{ secrets.S3_LINEUP_BUCKET }}
           S3_MODEL_BUCKET: ${{ secrets.S3_MODEL_BUCKET }}
           NEON_DATABASE_URL: ${{ secrets.NEON_DATABASE_URL }}
-        run: python github_pipeline_orchestrator.py --phases "${{ steps.phases.outputs.phases }}"
+        run: |
+          MODE="${{ github.event.inputs.mode || 'auto' }}"
+          python github_pipeline_orchestrator.py --phases "${{ steps.phases.outputs.phases }}" --mode "$MODE"
 
       - name: Upload logs on failure
         if: failure()
