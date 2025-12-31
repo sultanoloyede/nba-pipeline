@@ -37,9 +37,12 @@ logger = logging.getLogger(__name__)
 class PipelineOrchestrator:
     """Orchestrates the NBA Props pipeline phases"""
 
-    def __init__(self):
+    def __init__(self, stat_type='PRA'):
         self.script_dir = os.path.dirname(os.path.abspath(__file__))
-        self.phases = {
+        self.stat_type = stat_type.upper()
+
+        # PRA Pipeline (default)
+        pra_phases = {
             '1': {
                 'name': 'Data Fetching',
                 'script': 'phase1_fetch_data_optimized.py',
@@ -47,30 +50,73 @@ class PipelineOrchestrator:
                 'estimated_time': '30-60 minutes'
             },
             '2': {
-                'name': 'Data Processing',
+                'name': 'Data Processing (PRA)',
                 'script': 'phase2_process_data.py',
-                'description': 'Processes raw data and engineers features',
+                'description': 'Processes raw data and engineers PRA features',
                 'estimated_time': '15-30 minutes'
             },
             '2.5': {
-                'name': 'Pre-calculate Percentages',
+                'name': 'Pre-calculate Percentages (PRA)',
                 'script': 'phase2_5_precalculate_all_percentages.py',
-                'description': 'Pre-calculates all threshold percentages (10-51)',
+                'description': 'Pre-calculates all PRA threshold percentages (10-51)',
                 'estimated_time': '30-40 minutes'
             },
             '3': {
-                'name': 'Model Training',
+                'name': 'Model Training (PRA)',
                 'script': 'phase3_optimized.py',
-                'description': 'Trains 42 XGBoost models for different PRA thresholds',
+                'description': 'Trains 42 XGBoost models for PRA thresholds',
                 'estimated_time': '30-35 minutes'
             },
             '4': {
-                'name': 'Generate Predictions',
+                'name': 'Generate Predictions (PRA)',
                 'script': 'phase4_generate_predictions.py',
-                'description': 'Generates daily predictions and uploads to database',
+                'description': 'Generates daily PRA predictions and uploads to database',
                 'estimated_time': '5-10 minutes'
             }
         }
+
+        # RA Pipeline
+        ra_phases = {
+            '1': {
+                'name': 'Data Fetching',
+                'script': 'phase1_fetch_data_optimized.py',
+                'description': 'Fetches NBA player stats and game logs from NBA API',
+                'estimated_time': '30-60 minutes'
+            },
+            '2': {
+                'name': 'Data Processing (RA)',
+                'script': 'phase2_ra.py',
+                'description': 'Processes raw data and engineers RA features',
+                'estimated_time': '15-30 minutes'
+            },
+            '2.5': {
+                'name': 'Pre-calculate Percentages (RA)',
+                'script': 'phase2_5_ra.py',
+                'description': 'Pre-calculates all RA threshold percentages (5-26)',
+                'estimated_time': '30-40 minutes'
+            },
+            '3': {
+                'name': 'Model Training (RA)',
+                'script': 'phase3_ra.py',
+                'description': 'Trains 22 XGBoost models for RA thresholds (5-26)',
+                'estimated_time': '15-20 minutes'
+            },
+            '4': {
+                'name': 'Generate Predictions (RA)',
+                'script': 'phase4_ra.py',
+                'description': 'Placeholder - use single_player_ra_gauntlet.py for testing',
+                'estimated_time': '1 minute'
+            }
+        }
+
+        # Select phases based on stat_type
+        if self.stat_type == 'RA':
+            self.phases = ra_phases
+            logger.info(f"Initialized orchestrator for RA pipeline")
+        else:
+            self.phases = pra_phases
+            logger.info(f"Initialized orchestrator for PRA pipeline")
+
 
     def validate_environment(self):
         """Validate required environment variables"""
@@ -174,6 +220,7 @@ class PipelineOrchestrator:
             bool: True if all phases succeeded, False otherwise
         """
         logger.info("Starting NBA Props Pipeline")
+        logger.info(f"Stat Type: {self.stat_type}")
         logger.info(f"Phases to run: {', '.join(phases_to_run)}")
 
         # Validate environment first
@@ -253,17 +300,17 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Run all phases
-  python github_pipeline_orchestrator.py --phases "all"
+  # Run all PRA phases
+  python github_pipeline_orchestrator.py --phases "all" --stat-type PRA
 
-  # Run daily pipeline (no model training)
-  python github_pipeline_orchestrator.py --phases "1,2,4"
+  # Run RA pipeline (phases 2, 2.5, 3)
+  python github_pipeline_orchestrator.py --phases "2,2.5,3" --stat-type RA
 
-  # Run weekly pipeline (with model training)
-  python github_pipeline_orchestrator.py --phases "1,2,3,4"
+  # Run daily PRA pipeline (no model training)
+  python github_pipeline_orchestrator.py --phases "1,2,4" --stat-type PRA
 
-  # Run only prediction phase
-  python github_pipeline_orchestrator.py --phases "4"
+  # Run weekly PRA pipeline (with model training)
+  python github_pipeline_orchestrator.py --phases "1,2,3,4" --stat-type PRA
         """
     )
 
@@ -274,13 +321,21 @@ Examples:
         help='Comma-separated phase numbers to run (e.g., "1,2,4") or "all"'
     )
 
+    parser.add_argument(
+        '--stat-type',
+        type=str,
+        default='PRA',
+        choices=['PRA', 'RA', 'PA', 'PR'],
+        help='Stat type to process (default: PRA). Currently PRA and RA are supported.'
+    )
+
     args = parser.parse_args()
 
     # Parse phases
     phases_to_run = parse_phases(args.phases)
 
-    # Create orchestrator and run pipeline
-    orchestrator = PipelineOrchestrator()
+    # Create orchestrator with stat type and run pipeline
+    orchestrator = PipelineOrchestrator(stat_type=args.stat_type)
     success = orchestrator.run_pipeline(phases_to_run)
 
     # Exit with appropriate code

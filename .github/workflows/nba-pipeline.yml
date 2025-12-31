@@ -11,6 +11,14 @@ on:
   # Allow manual trigger
   workflow_dispatch:
     inputs:
+      stat_type:
+        description: 'Stat type to process'
+        required: true
+        default: 'PRA'
+        type: choice
+        options:
+          - PRA
+          - RA
       phases:
         description: 'Phases to run (e.g., "1,2,3,4" or "all")'
         required: true
@@ -40,28 +48,34 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Determine phases to run
-        id: phases
+      - name: Determine phases and stat type to run
+        id: config
         run: |
           if [ "${{ github.event_name }}" = "schedule" ]; then
+            # Scheduled jobs default to PRA
+            echo "stat_type=PRA" >> $GITHUB_OUTPUT
             # Daily cron job - runs phases 2 and 2.5 (data processing and percentages)
             if [ "${{ github.event.schedule }}" = "0 10 * * *" ]; then
               echo "phases=2,2.5" >> $GITHUB_OUTPUT
-              echo "Running daily pipeline (Phases 2, 2.5)"
+              echo "Running daily PRA pipeline (Phases 2, 2.5)"
             # Weekly cron job - runs phases 2, 2.5, and 3 (includes model training)
             else
               echo "phases=2,2.5,3" >> $GITHUB_OUTPUT
-              echo "Running weekly pipeline (Phases 2, 2.5, 3)"
+              echo "Running weekly PRA pipeline (Phases 2, 2.5, 3)"
             fi
           else
-            # Manual trigger - use input
+            # Manual trigger - use inputs
+            STAT_TYPE="${{ github.event.inputs.stat_type }}"
             PHASES="${{ github.event.inputs.phases }}"
+
+            echo "stat_type=$STAT_TYPE" >> $GITHUB_OUTPUT
+
             if [ "$PHASES" = "all" ]; then
               echo "phases=2,2.5,3" >> $GITHUB_OUTPUT
             else
               echo "phases=$PHASES" >> $GITHUB_OUTPUT
             fi
-            echo "Running manual pipeline (Phases $PHASES)"
+            echo "Running manual $STAT_TYPE pipeline (Phases $PHASES)"
           fi
 
       - name: Run NBA Pipeline
@@ -73,7 +87,7 @@ jobs:
           S3_LINEUP_BUCKET: ${{ secrets.S3_LINEUP_BUCKET }}
           S3_MODEL_BUCKET: ${{ secrets.S3_MODEL_BUCKET }}
           NEON_DATABASE_URL: ${{ secrets.NEON_DATABASE_URL }}
-        run: python github_pipeline_orchestrator.py --phases "${{ steps.phases.outputs.phases }}"
+        run: python github_pipeline_orchestrator.py --phases "${{ steps.config.outputs.phases }}" --stat-type "${{ steps.config.outputs.stat_type }}"
 
       - name: Upload logs on failure
         if: failure()
