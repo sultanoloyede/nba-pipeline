@@ -205,7 +205,7 @@ def recalculate_base_features_for_stat_type(df: pd.DataFrame, stat_column: str) 
 
     # 1. Rolling averages (5, 10, 20 games)
     logger.info(f"  Recalculating rolling averages for {stat_column}...")
-    grouped = df.groupby(['Player_ID', 'TEAM', 'SEASON_ID'])
+    grouped = df.groupby(['Player_ID', 'TEAM', 'SEASON_ID'], group_keys=False)
 
     def rolling_for_group(group):
         group['last_5_avg'] = group[stat_column].rolling(5, min_periods=1).mean().shift(1)
@@ -477,7 +477,7 @@ def calculate_last_season_percentage_all_thresholds_vectorized(df: pd.DataFrame,
 
         # For each player-season, calculate % of games >= threshold
         # Note: Group by Player_ID and SEASON_ID only (not TEAM) to handle team changes
-        season_stats = df.groupby(['Player_ID', 'SEASON_ID']).apply(
+        season_stats = df.groupby(['Player_ID', 'SEASON_ID'], group_keys=False).apply(
             lambda x: (x[stat_column] >= threshold).mean()
         ).reset_index()
         season_stats.columns = ['Player_ID', 'SEASON_ID', 'pct']
