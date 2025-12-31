@@ -16,6 +16,13 @@ when predicting FUTURE games, the most recent game is now in the PAST. Therefore
 reconstruct all features (rolling averages, percentages) to INCLUDE the current game's
 stat value. This ensures predictions are based on the most up-to-date performance data.
 
+CRITICAL FIX: Stat-Type Specific Features
+All base features (last_5_avg, season_avg, last_season_avg, lineup_average, h2h_avg,
+opp_strength) are recalculated using the CORRECT stat type (PRA, PA, PR, or RA) during
+prediction. This ensures feature alignment with the target variable and prevents the
+conservative prediction bias that occurs when PRA-based features are used to predict
+PA/PR/RA outcomes.
+
 Author: Generated for NBA Props Prediction System
 Date: 2025-12-29
 """
@@ -443,8 +450,11 @@ def reconstruct_features_for_prediction(player_row, full_df, thresholds, today_o
     # Season average (including current game)
     features['season_avg'] = player_season_games[stat_type].mean() if len(player_season_games) > 0 else 0
 
-    # Last season average (unchanged - copy from player_row)
-    features['last_season_avg'] = player_row.get('last_season_avg', 0)
+    # Last season average (recalculated using correct stat_type)
+    # Get games from previous season for this player
+    last_season_id = current_season - 1
+    player_last_season_games = player_all_games[player_all_games['SEASON_ID'] == last_season_id]
+    features['last_season_avg'] = player_last_season_games[stat_type].mean() if len(player_last_season_games) > 0 else 0
 
     # Lineup average (including current game)
     features['lineup_average'] = player_lineup_games[stat_type].mean() if len(player_lineup_games) > 0 else 0
@@ -452,8 +462,40 @@ def reconstruct_features_for_prediction(player_row, full_df, thresholds, today_o
     # H2H average (including current game)
     features['h2h_avg'] = player_h2h_games[stat_type].mean() if len(player_h2h_games) > 0 else 0
 
-    # Opponent strength (we'll use the value from player_row as it requires complex calculation)
-    features['opp_strength'] = player_row.get('opp_strength', 0)
+    # Opponent strength (recalculated using correct stat_type)
+    # Calculate how often players went under their projection against this opponent
+    # Using games from current season where players faced this opponent
+    opponent_games = full_df[
+        (full_df['OPPONENT'] == opponent) &
+        (full_df['SEASON_ID'] == current_season) &
+        (full_df['GAME_DATE_PARSED'] < current_date)
+    ]
+
+    if len(opponent_games) > 0:
+        # For each game, check if the stat was below the player's rolling average
+        # Create a temporary rolling average based on the stat_type
+        opponent_strength_values = []
+
+        for _, game_row in opponent_games.iterrows():
+            game_player_id = game_row['Player_ID']
+            game_date = game_row['GAME_DATE_PARSED']
+
+            # Get player's games before this game
+            prior_games = full_df[
+                (full_df['Player_ID'] == game_player_id) &
+                (full_df['GAME_DATE_PARSED'] < game_date)
+            ].tail(5)
+
+            if len(prior_games) > 0:
+                # Calculate last 5 average for this stat type
+                last_5_avg_for_stat = prior_games[stat_type].mean()
+                # Check if went under
+                went_under = 1 if game_row[stat_type] < np.floor(last_5_avg_for_stat) else 0
+                opponent_strength_values.append(went_under)
+
+        features['opp_strength'] = np.mean(opponent_strength_values) if len(opponent_strength_values) > 0 else 0
+    else:
+        features['opp_strength'] = 0
 
     # ========================================================================
     # THRESHOLD-SPECIFIC PERCENTAGE FEATURES

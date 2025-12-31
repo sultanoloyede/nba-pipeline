@@ -124,7 +124,7 @@ def calculate_percentages_incremental(df_existing: pd.DataFrame,
     Returns:
         DataFrame with new games and calculated percentages
     """
-    logger.info(f"Calculating incremental percentages for {len(df_new):,} new games...")
+    logger.info(f"Calculating incremental features for {len(df_new):,} new games...")
 
     # Combine existing and new data for context (existing data provides history)
     df_combined = pd.concat([df_existing, df_new], ignore_index=True)
@@ -134,7 +134,11 @@ def calculate_percentages_incremental(df_existing: pd.DataFrame,
     df_combined['is_new'] = False
     df_combined.loc[df_combined.index >= len(df_existing), 'is_new'] = True
 
-    # Calculate all percentages with full historical context
+    # STEP 1: Recalculate base features for ALL rows (including new) using correct stat type
+    logger.info(f"  Recalculating base features for {stat_column}...")
+    df_combined = recalculate_base_features_for_stat_type(df_combined, stat_column)
+
+    # STEP 2: Calculate all percentages with full historical context
     # The functions will naturally use existing data as history for new games
 
     # Rolling percentages
@@ -178,6 +182,142 @@ def calculate_percentages_incremental(df_existing: pd.DataFrame,
     logger.info(f"Completed incremental processing for {len(df_new_processed):,} new games")
 
     return df_new_processed
+
+
+def recalculate_base_features_for_stat_type(df: pd.DataFrame, stat_column: str) -> pd.DataFrame:
+    """
+    Recalculate ALL base features using the specified stat column.
+
+    This ensures each stat type (PRA, PA, PR, RA) has its own independent features
+    instead of relying on PRA-based features from Phase 2.
+
+    Args:
+        df: DataFrame with stat columns
+        stat_column: The stat column to use (e.g., 'PRA', 'PA', 'PR', 'RA')
+
+    Returns:
+        DataFrame with recalculated base features
+    """
+    logger.info(f"Recalculating base features using {stat_column}...")
+
+    # Sort for rolling calculations
+    df = df.sort_values(['Player_ID', 'TEAM', 'SEASON_ID', 'GAME_DATE_PARSED'])
+
+    # 1. Rolling averages (5, 10, 20 games)
+    logger.info(f"  Recalculating rolling averages for {stat_column}...")
+    grouped = df.groupby(['Player_ID', 'TEAM', 'SEASON_ID'])
+
+    def rolling_for_group(group):
+        group['last_5_avg'] = group[stat_column].rolling(5, min_periods=1).mean().shift(1)
+        group['last_10_avg'] = group[stat_column].rolling(10, min_periods=1).mean().shift(1)
+        group['last_20_avg'] = group[stat_column].rolling(20, min_periods=1).mean().shift(1)
+        return group
+
+    df = grouped.apply(rolling_for_group)
+
+    # 2. Season average (current season, excluding current game)
+    logger.info(f"  Recalculating season average for {stat_column}...")
+    df['season_avg'] = df.groupby(['Player_ID', 'TEAM', 'SEASON_ID'])[stat_column].transform(
+        lambda x: x.expanding().mean().shift(1)
+    )
+
+    # 3. Last season average
+    logger.info(f"  Recalculating last season average for {stat_column}...")
+    season_stats = df.groupby(['Player_ID', 'SEASON_ID'])[stat_column].mean().reset_index()
+    season_stats.columns = ['Player_ID', 'SEASON_ID', 'last_season_avg']
+    season_stats['SEASON_ID'] = season_stats['SEASON_ID'] + 1
+
+    # Drop old last_season_avg if it exists, then merge
+    if 'last_season_avg' in df.columns:
+        df = df.drop('last_season_avg', axis=1)
+    df = df.merge(season_stats, on=['Player_ID', 'SEASON_ID'], how='left')
+    df['last_season_avg'] = df['last_season_avg'].fillna(0.0)
+
+    # 4. Lineup average
+    logger.info(f"  Recalculating lineup average for {stat_column}...")
+    df = df.sort_values(['Player_ID', 'TEAM', 'LINEUP_ID', 'GAME_DATE_PARSED'])
+    df['lineup_average'] = df.groupby(['Player_ID', 'TEAM', 'LINEUP_ID'])[stat_column].transform(
+        lambda x: x.expanding().mean().shift(1)
+    )
+
+    # For first game with lineup, use average from previous first-lineup-games
+    mask = df['lineup_average'].isna()
+    if mask.sum() > 0:
+        logger.info(f"    Filling {mask.sum()} first-time lineup games...")
+        df = df.sort_values(['Player_ID', 'TEAM', 'GAME_DATE_PARSED'])
+
+        def calc_new_lineup_avg(group):
+            first_game_stats = []
+            new_lineup_avgs = []
+
+            for idx in range(len(group)):
+                if pd.isna(group.iloc[idx]['lineup_average']):
+                    if len(first_game_stats) > 0:
+                        new_lineup_avgs.append(np.mean(first_game_stats))
+                    else:
+                        new_lineup_avgs.append(0.0)
+                    first_game_stats.append(group.iloc[idx][stat_column])
+                else:
+                    new_lineup_avgs.append(np.nan)
+
+            group['new_lineup_avg'] = new_lineup_avgs
+            return group
+
+        df = df.groupby(['Player_ID', 'TEAM'], group_keys=False).apply(calc_new_lineup_avg)
+        df.loc[mask, 'lineup_average'] = df.loc[mask, 'new_lineup_avg']
+        df = df.drop('new_lineup_avg', axis=1)
+
+    df['lineup_average'] = df['lineup_average'].fillna(0.0)
+
+    # 5. H2H average (last 3 seasons)
+    logger.info(f"  Recalculating H2H average for {stat_column}...")
+    df = df.sort_values(['Player_ID', 'OPPONENT', 'SEASON_ID', 'GAME_DATE_PARSED'])
+
+    h2h_avgs = []
+    grouped_h2h = df.groupby(['Player_ID', 'OPPONENT'])
+
+    for (player_id, opponent), group in grouped_h2h:
+        group_sorted = group.sort_values(['SEASON_ID', 'GAME_DATE_PARSED']).reset_index(drop=True)
+
+        for row_pos in range(len(group_sorted)):
+            row = group_sorted.iloc[row_pos]
+            current_season = row['SEASON_ID']
+            target_seasons = [current_season, current_season - 1, current_season - 2]
+
+            prev_games = group_sorted.iloc[:row_pos]
+            prev_games = prev_games[prev_games['SEASON_ID'].isin(target_seasons)]
+
+            if len(prev_games) > 0:
+                h2h_avgs.append(prev_games[stat_column].mean())
+            else:
+                h2h_avgs.append(0.0)
+
+    df['h2h_avg'] = h2h_avgs
+
+    # 6. Opponent strength
+    logger.info(f"  Recalculating opponent strength for {stat_column}...")
+    df = df.sort_values(['OPPONENT', 'SEASON_ID', 'GAME_DATE_PARSED'])
+
+    def opp_strength_for_season(group):
+        group = group.sort_values('GAME_DATE_PARSED')
+        group['went_under'] = (group[stat_column] < np.floor(group['last_5_avg'])).astype(float)
+        group['went_under'] = group['went_under'].fillna(0.0)
+        group['opp_strength'] = group['went_under'].expanding().mean().shift(1)
+        group = group.drop('went_under', axis=1)
+        return group
+
+    grouped_opp = df.groupby(['OPPONENT', 'SEASON_ID'])
+    results = []
+    for i, (name, group) in enumerate(grouped_opp):
+        if i % 100 == 0 and i > 0:
+            logger.info(f"    Progress: {i}/{len(grouped_opp)} opponent-season groups")
+        results.append(opp_strength_for_season(group))
+
+    df = pd.concat(results)
+    df['opp_strength'] = df['opp_strength'].fillna(0.0)
+
+    logger.info(f"✓ Recalculated all base features for {stat_column}")
+    return df
 
 
 def calculate_rolling_percentage_all_thresholds_vectorized(df: pd.DataFrame,
@@ -659,12 +799,19 @@ def run_phase_2_5(s3_handler,
         if actual_mode == 'full':
             # FULL MODE (existing behavior with stat_column support)
             logger.info("\n=== FULL MODE ===")
-            logger.info(f"\nStep 2: Calculating percentage columns for {len(thresholds)} thresholds (VECTORIZED)...")
+
+            # STEP 2A: Recalculate base features for this stat type
+            logger.info(f"\nStep 2A: Recalculating base features for {stat_type} (NEW - ensures independence)...")
+            df = recalculate_base_features_for_stat_type(df, stat_type)
+            logger.info(f"✓ Base features recalculated using {stat_type}")
+
+            # STEP 2B: Calculate percentage columns
+            logger.info(f"\nStep 2B: Calculating percentage columns for {len(thresholds)} thresholds (VECTORIZED)...")
             logger.info(f"  Thresholds: {threshold_start} to {threshold_end}")
             logger.info(f"  Stat column: {stat_type}")
 
             # Calculate rolling percentages (windows: 5, 10, 20)
-            logger.info("\n[1/7] Calculating rolling percentages...")
+            logger.info("\n[1/6] Calculating rolling percentages...")
             for window in [5, 10, 20]:
                 results = calculate_rolling_percentage_all_thresholds_vectorized(
                     df, thresholds, window, stat_type
@@ -674,7 +821,7 @@ def run_phase_2_5(s3_handler,
                 logger.info(f"  ✓ Added last_{window}_pct columns for all thresholds")
 
             # Calculate season percentages
-            logger.info("\n[2/7] Calculating season percentages...")
+            logger.info("\n[2/6] Calculating season percentages...")
             season_results = calculate_season_percentage_all_thresholds_vectorized(
                 df, thresholds, stat_type
             )
@@ -683,7 +830,7 @@ def run_phase_2_5(s3_handler,
             logger.info(f"  ✓ Added season_pct columns for all thresholds")
 
             # Calculate last season percentages
-            logger.info("\n[3/7] Calculating last season percentages...")
+            logger.info("\n[3/6] Calculating last season percentages...")
             last_season_results = calculate_last_season_percentage_all_thresholds_vectorized(
                 df, thresholds, stat_type
             )
@@ -692,7 +839,7 @@ def run_phase_2_5(s3_handler,
             logger.info(f"  ✓ Added last_season_pct columns for all thresholds")
 
             # Calculate lineup percentages
-            logger.info("\n[4/7] Calculating lineup percentages...")
+            logger.info("\n[4/6] Calculating lineup percentages...")
             lineup_results = calculate_lineup_percentage_all_thresholds_vectorized(
                 df, thresholds, stat_type
             )
@@ -701,7 +848,7 @@ def run_phase_2_5(s3_handler,
             logger.info(f"  ✓ Added lineup_pct columns for all thresholds")
 
             # Calculate h2h percentages
-            logger.info("\n[5/7] Calculating H2H percentages...")
+            logger.info("\n[5/6] Calculating H2H percentages...")
             h2h_results = calculate_h2h_percentage_all_thresholds_vectorized(
                 df, thresholds, stat_type
             )
@@ -712,7 +859,7 @@ def run_phase_2_5(s3_handler,
             rows_processed = len(df)
 
         # Step 3: Save to S3 with stat type in filename
-        logger.info(f"\n[6/7] Saving pre-calculated data to S3...")
+        logger.info(f"\nStep 3: Saving pre-calculated data to S3...")
         output_key = f'processed_data/processed_with_{stat_type.lower()}_pct_{threshold_start}-{threshold_end}.csv'
 
         # Calculate file size before upload
@@ -756,7 +903,7 @@ def run_phase_2_5(s3_handler,
         if actual_mode == 'incremental':
             stats['time_saved_pct'] = round((1 - rows_processed / len(df)) * 100, 1)
 
-        logger.info("\n[7/7] " + "=" * 80)
+        logger.info("\n" + "=" * 80)
         logger.info(f"PHASE 2.5 SUMMARY ({stat_type})")
         logger.info("=" * 80)
         logger.info(f"Mode: {actual_mode.upper()}")
@@ -788,15 +935,16 @@ def run_phase_2_5(s3_handler,
 if __name__ == '__main__':
     # For local testing
     import argparse
+    import sys
 
     logging.basicConfig(
         level=logging.INFO,
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
     )
 
-    parser = argparse.ArgumentParser(description='Phase 2.5: Pre-calculate percentages')
-    parser.add_argument('--stat-type', default='PRA', choices=['PRA', 'PA', 'PR', 'RA'],
-                       help='Stat type to process (default: PRA)')
+    parser = argparse.ArgumentParser(description='Phase 2.5: Pre-calculate percentages for all stat types')
+    parser.add_argument('--stat-type', default='all', choices=['all', 'PRA', 'PA', 'PR', 'RA'],
+                       help='Stat type to process (default: all)')
     parser.add_argument('--threshold-start', type=int, help='Starting threshold')
     parser.add_argument('--threshold-end', type=int, help='Ending threshold')
     parser.add_argument('--mode', default='auto', choices=['auto', 'full', 'incremental'],
@@ -807,17 +955,56 @@ if __name__ == '__main__':
     from s3_utils import S3Handler
 
     s3_handler = S3Handler()
-    success, stats = run_phase_2_5(
-        s3_handler,
-        stat_type=args.stat_type,
-        threshold_start=args.threshold_start,
-        threshold_end=args.threshold_end,
-        mode=args.mode
-    )
 
-    if success:
-        print(f"\n✓ Phase 2.5 completed successfully for {args.stat_type}!")
-        print(f"Stats: {stats}")
+    # Determine which stat types to process
+    if args.stat_type == 'all':
+        stat_types_to_process = ['PRA', 'PA', 'PR', 'RA']
+        logger.info("=" * 80)
+        logger.info("PROCESSING ALL STAT TYPES: PRA, PA, PR, RA")
+        logger.info("=" * 80)
     else:
-        print(f"\n✗ Phase 2.5 failed for {args.stat_type}!")
-        print(f"Error: {stats.get('error')}")
+        stat_types_to_process = [args.stat_type]
+
+    # Process each stat type
+    all_results = {}
+    overall_success = True
+
+    for stat_type in stat_types_to_process:
+        logger.info("\n" + "=" * 80)
+        logger.info(f"STARTING PHASE 2.5 FOR {stat_type}")
+        logger.info("=" * 80)
+
+        success, stats = run_phase_2_5(
+            s3_handler,
+            stat_type=stat_type,
+            threshold_start=args.threshold_start,
+            threshold_end=args.threshold_end,
+            mode=args.mode
+        )
+
+        all_results[stat_type] = {'success': success, 'stats': stats}
+
+        if success:
+            logger.info(f"✓ Phase 2.5 completed successfully for {stat_type}!")
+        else:
+            logger.error(f"✗ Phase 2.5 failed for {stat_type}!")
+            logger.error(f"Error: {stats.get('error')}")
+            overall_success = False
+
+    # Print final summary
+    print("\n" + "=" * 80)
+    print("PHASE 2.5 FINAL SUMMARY")
+    print("=" * 80)
+
+    for stat_type, result in all_results.items():
+        status = "✓ SUCCESS" if result['success'] else "✗ FAILED"
+        print(f"{stat_type}: {status}")
+        if result['success']:
+            stats = result['stats']
+            print(f"  Rows: {stats.get('total_rows', 'N/A'):,}")
+            print(f"  Mode: {stats.get('mode', 'N/A')}")
+            print(f"  Time: {stats.get('processing_time_seconds', 'N/A')}s")
+
+    print("=" * 80)
+
+    sys.exit(0 if overall_success else 1)

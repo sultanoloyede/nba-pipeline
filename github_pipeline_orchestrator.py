@@ -38,8 +38,9 @@ logger = logging.getLogger(__name__)
 class PipelineOrchestrator:
     """Orchestrates the NBA Props pipeline phases"""
 
-    def __init__(self):
+    def __init__(self, phase_2_5_mode: str = 'auto'):
         self.script_dir = os.path.dirname(os.path.abspath(__file__))
+        self.phase_2_5_mode = phase_2_5_mode
         self.phases = {
             '1': {
                 'name': 'Data Fetching',
@@ -135,15 +136,15 @@ class PipelineOrchestrator:
             logger.error(f"Error executing script: {e}")
             return False
 
-    def run_phase_2_5_all_stats(self) -> bool:
-        """Run Phase 2.5 for all stat types (PRA, PA, PR, RA)"""
-        stat_configs = {
-            'PRA': {'threshold_start': 10, 'threshold_end': 51},
-            'PA': {'threshold_start': 8, 'threshold_end': 41},
-            'PR': {'threshold_start': 8, 'threshold_end': 41},
-            'RA': {'threshold_start': 5, 'threshold_end': 26}
-        }
+    def run_phase_2_5_all_stats(self, mode: str = 'auto') -> bool:
+        """
+        Run Phase 2.5 for all stat types (PRA, PA, PR, RA) using new simplified approach.
 
+        The script now processes all stat types by default with --stat-type all.
+
+        Args:
+            mode: Processing mode ('auto', 'full', or 'incremental')
+        """
         phase = self.phases['2.5']
         script_path = os.path.join(self.script_dir, phase['script'])
 
@@ -152,60 +153,36 @@ class PipelineOrchestrator:
             return False
 
         logger.info("=" * 80)
-        logger.info(f"Starting Phase 2.5: {phase['name']} (Multi-Stat)")
+        logger.info(f"Starting Phase 2.5: {phase['name']} (All Stat Types)")
         logger.info(f"Description: {phase['description']}")
+        logger.info(f"Mode: {mode}")
         logger.info(f"Estimated time: {phase['estimated_time']}")
         logger.info("=" * 80)
 
         start_time = datetime.now()
-        all_success = True
-        completed_stats = []
 
-        for idx, (stat_type, config) in enumerate(stat_configs.items(), 1):
-            logger.info(f"\n[{idx}/{len(stat_configs)}] Running Phase 2.5 for {stat_type}...")
-            logger.info(f"Threshold range: {config['threshold_start']} to {config['threshold_end']}")
+        # New simplified approach - script handles all stat types
+        args = ['--mode', mode]
 
-            args = [
-                '--stat-type', stat_type,
-                '--threshold-start', str(config['threshold_start']),
-                '--threshold-end', str(config['threshold_end'])
-            ]
-
-            stat_start = datetime.now()
-            success = self.execute_script_with_args(script_path, args)
-            stat_end = datetime.now()
-            stat_duration = (stat_end - stat_start).total_seconds() / 60
-
-            if success:
-                logger.info(f"Phase 2.5 for {stat_type} completed in {stat_duration:.2f} minutes")
-                completed_stats.append(stat_type)
-            else:
-                logger.error(f"Phase 2.5 for {stat_type} failed after {stat_duration:.2f} minutes")
-                all_success = False
-                break  # Stop on first failure
+        logger.info("Running Phase 2.5 for ALL stat types (PRA, PA, PR, RA) with single command...")
+        success = self.execute_script_with_args(script_path, args)
 
         end_time = datetime.now()
         total_duration = (end_time - start_time).total_seconds() / 60
 
-        if all_success:
+        if success:
             logger.info(f"Phase 2.5 completed successfully for all stat types in {total_duration:.2f} minutes")
-            logger.info(f"Completed stat types: {', '.join(completed_stats)}")
         else:
             logger.error(f"Phase 2.5 failed after {total_duration:.2f} minutes")
-            logger.error(f"Completed stat types: {', '.join(completed_stats)}")
-            logger.error(f"Failed on stat type: {stat_type}")
 
-        return all_success
+        return success
 
     def run_phase_3_all_stats(self) -> bool:
-        """Run Phase 3 for all stat types (PRA, PA, PR, RA)"""
-        stat_configs = {
-            'PRA': {'threshold_start': 10, 'threshold_end': 51},
-            'PA': {'threshold_start': 8, 'threshold_end': 41},
-            'PR': {'threshold_start': 8, 'threshold_end': 41},
-            'RA': {'threshold_start': 5, 'threshold_end': 26}
-        }
+        """
+        Run Phase 3 for all stat types (PRA, PA, PR, RA) using new simplified approach.
 
+        The script now trains all stat types by default with --stat-type all.
+        """
         phase = self.phases['3']
         script_path = os.path.join(self.script_dir, phase['script'])
 
@@ -214,50 +191,28 @@ class PipelineOrchestrator:
             return False
 
         logger.info("=" * 80)
-        logger.info(f"Starting Phase 3: {phase['name']} (Multi-Stat)")
+        logger.info(f"Starting Phase 3: {phase['name']} (All Stat Types)")
         logger.info(f"Description: {phase['description']}")
         logger.info(f"Estimated time: {phase['estimated_time']}")
         logger.info("=" * 80)
 
         start_time = datetime.now()
-        all_success = True
-        completed_stats = []
 
-        for idx, (stat_type, config) in enumerate(stat_configs.items(), 1):
-            logger.info(f"\n[{idx}/{len(stat_configs)}] Running Phase 3 for {stat_type}...")
-            logger.info(f"Threshold range: {config['threshold_start']} to {config['threshold_end']}")
+        # New simplified approach - script handles all stat types
+        logger.info("Training models for ALL stat types (PRA, PA, PR, RA) with single command...")
+        logger.info("This will train 132 total models (42 PRA + 34 PA + 34 PR + 22 RA)")
 
-            args = [
-                '--stat-type', stat_type,
-                '--threshold-start', str(config['threshold_start']),
-                '--threshold-end', str(config['threshold_end'])
-            ]
-
-            stat_start = datetime.now()
-            success = self.execute_script_with_args(script_path, args)
-            stat_end = datetime.now()
-            stat_duration = (stat_end - stat_start).total_seconds() / 60
-
-            if success:
-                logger.info(f"Phase 3 for {stat_type} completed in {stat_duration:.2f} minutes")
-                completed_stats.append(stat_type)
-            else:
-                logger.error(f"Phase 3 for {stat_type} failed after {stat_duration:.2f} minutes")
-                all_success = False
-                break  # Stop on first failure
+        success = self.execute_script_with_args(script_path, [])
 
         end_time = datetime.now()
         total_duration = (end_time - start_time).total_seconds() / 60
 
-        if all_success:
+        if success:
             logger.info(f"Phase 3 completed successfully for all stat types in {total_duration:.2f} minutes")
-            logger.info(f"Completed stat types: {', '.join(completed_stats)}")
         else:
             logger.error(f"Phase 3 failed after {total_duration:.2f} minutes")
-            logger.error(f"Completed stat types: {', '.join(completed_stats)}")
-            logger.error(f"Failed on stat type: {stat_type}")
 
-        return all_success
+        return success
 
     def run_phase(self, phase_num: str) -> bool:
         """
@@ -271,7 +226,7 @@ class PipelineOrchestrator:
         """
         # Special handling for Phase 2.5 and Phase 3 (multi-stat)
         if phase_num == '2.5':
-            return self.run_phase_2_5_all_stats()
+            return self.run_phase_2_5_all_stats(mode=self.phase_2_5_mode)
         elif phase_num == '3':
             return self.run_phase_3_all_stats()
 
@@ -445,13 +400,25 @@ Examples:
         help='Comma-separated phase numbers to run (e.g., "1,2,4") or "all"'
     )
 
+    parser.add_argument(
+        '--mode',
+        type=str,
+        default='auto',
+        choices=['auto', 'full', 'incremental'],
+        help='Phase 2.5 processing mode: auto (default), full (fresh run), or incremental (new games only)'
+    )
+
     args = parser.parse_args()
 
     # Parse phases
     phases_to_run = parse_phases(args.phases)
 
+    # Log mode if Phase 2.5 is in the pipeline
+    if '2.5' in phases_to_run or 'all' in args.phases.lower():
+        logger.info(f"Phase 2.5 mode: {args.mode}")
+
     # Create orchestrator and run pipeline
-    orchestrator = PipelineOrchestrator()
+    orchestrator = PipelineOrchestrator(phase_2_5_mode=args.mode)
     success = orchestrator.run_pipeline(phases_to_run)
 
     # Exit with appropriate code

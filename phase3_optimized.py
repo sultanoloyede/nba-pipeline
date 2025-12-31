@@ -330,10 +330,10 @@ if __name__ == '__main__':
     )
 
     # Parse command-line arguments
-    parser = argparse.ArgumentParser(description='Train NBA prop models for various stat types')
-    parser.add_argument('--stat-type', type=str, default='PRA',
-                        choices=['PRA', 'PA', 'PR', 'RA'],
-                        help='Stat type to train models for (default: PRA)')
+    parser = argparse.ArgumentParser(description='Train NBA prop models for all stat types')
+    parser.add_argument('--stat-type', type=str, default='all',
+                        choices=['all', 'PRA', 'PA', 'PR', 'RA'],
+                        help='Stat type to train models for (default: all)')
     parser.add_argument('--threshold-start', type=int, default=None,
                         help='Starting threshold (default: auto based on stat type)')
     parser.add_argument('--threshold-end', type=int, default=None,
@@ -349,39 +349,71 @@ if __name__ == '__main__':
         'RA': (5, 26)     # 22 models
     }
 
-    # Set threshold values (use provided or defaults)
-    threshold_start = args.threshold_start or stat_thresholds[args.stat_type][0]
-    threshold_end = args.threshold_end or stat_thresholds[args.stat_type][1]
-
     # Initialize S3 handler
     s3_handler = S3Handler()
 
-    # Log the configuration
+    # Determine which stat types to process
+    if args.stat_type == 'all':
+        stat_types_to_process = ['PRA', 'PA', 'PR', 'RA']
+        print("=" * 80)
+        print("TRAINING MODELS FOR ALL STAT TYPES: PRA, PA, PR, RA")
+        print("=" * 80)
+    else:
+        stat_types_to_process = [args.stat_type]
+
+    # Train models for each stat type
+    all_results = {}
+    overall_success = True
+
+    for stat_type in stat_types_to_process:
+        # Set threshold values (use provided or defaults)
+        threshold_start = args.threshold_start or stat_thresholds[stat_type][0]
+        threshold_end = args.threshold_end or stat_thresholds[stat_type][1]
+
+        # Log the configuration
+        print("\n" + "=" * 80)
+        print(f"STARTING PHASE 3 FOR {stat_type}")
+        print("=" * 80)
+        print(f"  Threshold Range: {threshold_start} to {threshold_end}")
+        print(f"  Total Models: {threshold_end - threshold_start + 1}")
+        print("=" * 80)
+
+        # Run Phase 3
+        success, stats = run_phase_3_optimized(
+            s3_handler,
+            stat_type=stat_type,
+            threshold_start=threshold_start,
+            threshold_end=threshold_end
+        )
+
+        all_results[stat_type] = {'success': success, 'stats': stats}
+
+        if success:
+            print(f"\n✓ Phase 3 completed successfully for {stat_type}!")
+        else:
+            print(f"\n✗ Phase 3 failed for {stat_type}!")
+            print(f"Error: {stats.get('error')}")
+            overall_success = False
+
+    # Print final summary
     print("\n" + "=" * 80)
-    print(f"Phase 3 Configuration:")
-    print(f"  Stat Type: {args.stat_type}")
-    print(f"  Threshold Range: {threshold_start} to {threshold_end}")
-    print(f"  Total Models: {threshold_end - threshold_start + 1}")
+    print("PHASE 3 FINAL SUMMARY")
     print("=" * 80)
 
-    # Run Phase 3
-    success, stats = run_phase_3_optimized(
-        s3_handler,
-        stat_type=args.stat_type,
-        threshold_start=threshold_start,
-        threshold_end=threshold_end
-    )
+    total_models = 0
+    for stat_type, result in all_results.items():
+        status = "✓ SUCCESS" if result['success'] else "✗ FAILED"
+        print(f"\n{stat_type}: {status}")
+        if result['success']:
+            stats = result['stats']
+            models_trained = stats.get('total_models', 0)
+            total_models += models_trained
+            print(f"  Models Trained: {models_trained}")
+            print(f"  Avg Precision: {stats.get('avg_precision', 0):.4f}")
+            print(f"  Avg Accuracy: {stats.get('avg_accuracy', 0):.4f}")
 
-    if success:
-        print("\n✓ Phase 3 completed successfully!")
-        print(f"Summary:")
-        print(f"  Stat Type: {stats['stat_type']}")
-        print(f"  Models Trained: {stats['total_models']}")
-        print(f"  Average Precision: {stats['avg_precision']:.4f}")
-        print(f"  Average Accuracy: {stats['avg_accuracy']:.4f}")
-    else:
-        print("\n✗ Phase 3 failed!")
-        print(f"Error: {stats.get('error')}")
+    print(f"\nTOTAL MODELS TRAINED: {total_models}")
+    print("=" * 80)
 
     # Exit with appropriate code
-    sys.exit(0 if success else 1)
+    sys.exit(0 if overall_success else 1)
