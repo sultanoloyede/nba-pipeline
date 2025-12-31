@@ -74,15 +74,16 @@ class DatabaseHandler:
             game_date VARCHAR(50) NOT NULL,
             prop VARCHAR(100) NOT NULL,
             line FLOAT NOT NULL,
-            probability FLOAT NOT NULL,
+            confidence_score FLOAT NOT NULL,
             last_5 FLOAT,
             last_10 FLOAT,
-            last_20 FLOAT,
             this_season FLOAT,
             last_season FLOAT,
             h2h FLOAT,
-            lineup_pct FLOAT,
-            lineup_id BIGINT,
+            opp_pts_rank INTEGER,
+            opp_reb_rank INTEGER,
+            opp_ast_rank INTEGER,
+            stat_type VARCHAR(10) DEFAULT 'PRA',
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
         """

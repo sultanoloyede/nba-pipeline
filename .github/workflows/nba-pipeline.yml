@@ -11,14 +11,11 @@ on:
   # Allow manual trigger
   workflow_dispatch:
     inputs:
-      stat_type:
-        description: 'Stat type to process'
+      stat_types:
+        description: 'Stat types to process (comma-separated or "all")'
         required: true
-        default: 'PRA'
-        type: choice
-        options:
-          - PRA
-          - RA
+        default: 'all'
+        type: string
       phases:
         description: 'Phases to run (e.g., "1,2,3,4" or "all")'
         required: true
@@ -48,34 +45,34 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Determine phases and stat type to run
+      - name: Determine phases and stat types to run
         id: config
         run: |
           if [ "${{ github.event_name }}" = "schedule" ]; then
-            # Scheduled jobs default to PRA
-            echo "stat_type=PRA" >> $GITHUB_OUTPUT
+            # Scheduled jobs default to all stat types
+            echo "stat_types=all" >> $GITHUB_OUTPUT
             # Daily cron job - runs phases 2 and 2.5 (data processing and percentages)
             if [ "${{ github.event.schedule }}" = "0 10 * * *" ]; then
               echo "phases=2,2.5" >> $GITHUB_OUTPUT
-              echo "Running daily PRA pipeline (Phases 2, 2.5)"
+              echo "Running daily pipeline for all stat types (Phases 2, 2.5)"
             # Weekly cron job - runs phases 2, 2.5, and 3 (includes model training)
             else
               echo "phases=2,2.5,3" >> $GITHUB_OUTPUT
-              echo "Running weekly PRA pipeline (Phases 2, 2.5, 3)"
+              echo "Running weekly pipeline for all stat types (Phases 2, 2.5, 3)"
             fi
           else
             # Manual trigger - use inputs
-            STAT_TYPE="${{ github.event.inputs.stat_type }}"
+            STAT_TYPES="${{ github.event.inputs.stat_types }}"
             PHASES="${{ github.event.inputs.phases }}"
 
-            echo "stat_type=$STAT_TYPE" >> $GITHUB_OUTPUT
+            echo "stat_types=$STAT_TYPES" >> $GITHUB_OUTPUT
 
             if [ "$PHASES" = "all" ]; then
               echo "phases=2,2.5,3" >> $GITHUB_OUTPUT
             else
               echo "phases=$PHASES" >> $GITHUB_OUTPUT
             fi
-            echo "Running manual $STAT_TYPE pipeline (Phases $PHASES)"
+            echo "Running manual pipeline for stat types: $STAT_TYPES (Phases: $PHASES)"
           fi
 
       - name: Run NBA Pipeline
@@ -87,7 +84,7 @@ jobs:
           S3_LINEUP_BUCKET: ${{ secrets.S3_LINEUP_BUCKET }}
           S3_MODEL_BUCKET: ${{ secrets.S3_MODEL_BUCKET }}
           NEON_DATABASE_URL: ${{ secrets.NEON_DATABASE_URL }}
-        run: python github_pipeline_orchestrator.py --phases "${{ steps.config.outputs.phases }}" --stat-type "${{ steps.config.outputs.stat_type }}"
+        run: python github_pipeline_orchestrator.py --phases "${{ steps.config.outputs.phases }}" --stat-types "${{ steps.config.outputs.stat_types }}"
 
       - name: Upload logs on failure
         if: failure()

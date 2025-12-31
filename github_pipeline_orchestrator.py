@@ -109,13 +109,84 @@ class PipelineOrchestrator:
             }
         }
 
+        # PA Pipeline
+        pa_phases = {
+            '1': {
+                'name': 'Data Fetching',
+                'script': 'phase1_fetch_data_optimized.py',
+                'description': 'Fetches NBA player stats and game logs from NBA API',
+                'estimated_time': '30-60 minutes'
+            },
+            '2': {
+                'name': 'Data Processing (PA)',
+                'script': 'phase2_pa.py',
+                'description': 'Processes raw data and engineers PA features',
+                'estimated_time': '15-30 minutes'
+            },
+            '2.5': {
+                'name': 'Pre-calculate Percentages (PA)',
+                'script': 'phase2_5_pa.py',
+                'description': 'Pre-calculates all PA threshold percentages (5-39)',
+                'estimated_time': '30-40 minutes'
+            },
+            '3': {
+                'name': 'Model Training (PA)',
+                'script': 'phase3_pa.py',
+                'description': 'Trains 35 XGBoost models for PA thresholds (5-39)',
+                'estimated_time': '20-25 minutes'
+            },
+            '4': {
+                'name': 'Generate Predictions (PA)',
+                'script': 'phase4_generate_predictions.py',
+                'description': 'Generates daily PA predictions and uploads to database',
+                'estimated_time': '5-10 minutes'
+            }
+        }
+
+        # PR Pipeline
+        pr_phases = {
+            '1': {
+                'name': 'Data Fetching',
+                'script': 'phase1_fetch_data_optimized.py',
+                'description': 'Fetches NBA player stats and game logs from NBA API',
+                'estimated_time': '30-60 minutes'
+            },
+            '2': {
+                'name': 'Data Processing (PR)',
+                'script': 'phase2_pr.py',
+                'description': 'Processes raw data and engineers PR features',
+                'estimated_time': '15-30 minutes'
+            },
+            '2.5': {
+                'name': 'Pre-calculate Percentages (PR)',
+                'script': 'phase2_5_pr.py',
+                'description': 'Pre-calculates all PR threshold percentages (5-39)',
+                'estimated_time': '30-40 minutes'
+            },
+            '3': {
+                'name': 'Model Training (PR)',
+                'script': 'phase3_pr.py',
+                'description': 'Trains 35 XGBoost models for PR thresholds (5-39)',
+                'estimated_time': '20-25 minutes'
+            },
+            '4': {
+                'name': 'Generate Predictions (PR)',
+                'script': 'phase4_generate_predictions.py',
+                'description': 'Generates daily PR predictions and uploads to database',
+                'estimated_time': '5-10 minutes'
+            }
+        }
+
         # Select phases based on stat_type
-        if self.stat_type == 'RA':
-            self.phases = ra_phases
-            logger.info(f"Initialized orchestrator for RA pipeline")
-        else:
-            self.phases = pra_phases
-            logger.info(f"Initialized orchestrator for PRA pipeline")
+        phase_map = {
+            'PRA': pra_phases,
+            'RA': ra_phases,
+            'PA': pa_phases,
+            'PR': pr_phases
+        }
+
+        self.phases = phase_map.get(self.stat_type, pra_phases)
+        logger.info(f"Initialized orchestrator for {self.stat_type} pipeline")
 
 
     def validate_environment(self):
@@ -293,6 +364,33 @@ def parse_phases(phases_str: str) -> list:
     return phases
 
 
+def parse_stat_types(stat_types_str: str) -> list:
+    """
+    Parse stat types string into list of stat types
+
+    Args:
+        stat_types_str: Comma-separated stat types or 'all'
+
+    Returns:
+        list: List of stat types
+    """
+    if stat_types_str.lower() == 'all':
+        return ['PRA', 'RA', 'PA', 'PR']
+
+    stat_types = [s.strip().upper() for s in stat_types_str.split(',')]
+
+    # Validate stat types
+    valid_stat_types = ['PRA', 'RA', 'PA', 'PR']
+    invalid = [s for s in stat_types if s not in valid_stat_types]
+
+    if invalid:
+        logger.error(f"Invalid stat types specified: {', '.join(invalid)}")
+        logger.error(f"Valid stat types are: {', '.join(valid_stat_types)}")
+        sys.exit(1)
+
+    return stat_types
+
+
 def main():
     """Main entry point"""
     parser = argparse.ArgumentParser(
@@ -300,17 +398,20 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Run all PRA phases
-  python github_pipeline_orchestrator.py --phases "all" --stat-type PRA
+  # Run all phases for all stat types
+  python github_pipeline_orchestrator.py --phases "all" --stat-types "all"
 
-  # Run RA pipeline (phases 2, 2.5, 3)
-  python github_pipeline_orchestrator.py --phases "2,2.5,3" --stat-type RA
+  # Run specific stat types (phases 2, 2.5, 3)
+  python github_pipeline_orchestrator.py --phases "2,2.5,3" --stat-types "PRA,RA"
 
-  # Run daily PRA pipeline (no model training)
-  python github_pipeline_orchestrator.py --phases "1,2,4" --stat-type PRA
+  # Run only PA predictions
+  python github_pipeline_orchestrator.py --phases "2,2.5,3" --stat-types "PA"
 
-  # Run weekly PRA pipeline (with model training)
-  python github_pipeline_orchestrator.py --phases "1,2,3,4" --stat-type PRA
+  # Run daily pipeline for all stat types (no model training)
+  python github_pipeline_orchestrator.py --phases "2,2.5" --stat-types "all"
+
+  # Run weekly pipeline for all stat types (with model training)
+  python github_pipeline_orchestrator.py --phases "2,2.5,3" --stat-types "all"
         """
     )
 
@@ -318,28 +419,75 @@ Examples:
         '--phases',
         type=str,
         required=True,
-        help='Comma-separated phase numbers to run (e.g., "1,2,4") or "all"'
+        help='Comma-separated phase numbers to run (e.g., "2,2.5,3") or "all"'
     )
 
     parser.add_argument(
-        '--stat-type',
+        '--stat-types',
         type=str,
-        default='PRA',
-        choices=['PRA', 'RA', 'PA', 'PR'],
-        help='Stat type to process (default: PRA). Currently PRA and RA are supported.'
+        default='all',
+        help='Comma-separated stat types to process (e.g., "PRA,RA") or "all" (default: all)'
+    )
+
+    parser.add_argument(
+        '--mode',
+        type=str,
+        default='auto',
+        choices=['auto', 'full', 'incremental'],
+        help='Phase 2.5 mode: auto (default), full (fresh run), or incremental'
     )
 
     args = parser.parse_args()
 
-    # Parse phases
+    # Parse phases and stat types
     phases_to_run = parse_phases(args.phases)
+    stat_types_to_run = parse_stat_types(args.stat_types)
 
-    # Create orchestrator with stat type and run pipeline
-    orchestrator = PipelineOrchestrator(stat_type=args.stat_type)
-    success = orchestrator.run_pipeline(phases_to_run)
+    logger.info("=" * 80)
+    logger.info("NBA PROPS PIPELINE - MULTI-STAT TYPE RUN")
+    logger.info("=" * 80)
+    logger.info(f"Stat types to process: {', '.join(stat_types_to_run)}")
+    logger.info(f"Phases to run for each: {', '.join(phases_to_run)}")
+    logger.info("=" * 80)
 
-    # Exit with appropriate code
-    sys.exit(0 if success else 1)
+    overall_start = datetime.now()
+    failed_stat_types = []
+
+    # Run pipeline for each stat type in succession
+    for stat_type in stat_types_to_run:
+        logger.info("")
+        logger.info("=" * 80)
+        logger.info(f"STARTING {stat_type} PIPELINE")
+        logger.info("=" * 80)
+
+        # Create orchestrator for this stat type and run pipeline
+        orchestrator = PipelineOrchestrator(stat_type=stat_type)
+        success = orchestrator.run_pipeline(phases_to_run)
+
+        if not success:
+            failed_stat_types.append(stat_type)
+            logger.error(f"{stat_type} pipeline failed. Continuing to next stat type...")
+        else:
+            logger.info(f"{stat_type} pipeline completed successfully!")
+
+    overall_end = datetime.now()
+    total_duration = (overall_end - overall_start).total_seconds() / 60
+
+    # Final summary
+    logger.info("")
+    logger.info("=" * 80)
+    logger.info("OVERALL PIPELINE SUMMARY")
+    logger.info("=" * 80)
+    logger.info(f"Total Duration: {total_duration:.2f} minutes")
+    logger.info(f"Stat Types Processed: {', '.join(stat_types_to_run)}")
+
+    if failed_stat_types:
+        logger.error(f"Failed Stat Types: {', '.join(failed_stat_types)}")
+        logger.error("Some pipelines completed with errors")
+        sys.exit(1)
+    else:
+        logger.info("All stat type pipelines completed successfully!")
+        sys.exit(0)
 
 
 if __name__ == '__main__':

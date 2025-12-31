@@ -184,7 +184,7 @@ def fetch_league_leaders():
         return pd.DataFrame()
 
 
-def get_players_playing_today(s3_handler, teams_playing, league_leaders_df):
+def get_players_playing_today(s3_handler, teams_playing, league_leaders_df, stat_type='PRA'):
     """
     Filter processed data for players on teams playing today.
 
@@ -198,7 +198,8 @@ def get_players_playing_today(s3_handler, teams_playing, league_leaders_df):
     Args:
         s3_handler: S3Handler instance
         teams_playing: Set of team abbreviations playing today
-        league_leaders_df: League leaders with 10+ PRA
+        league_leaders_df: League leaders
+        stat_type: Stat type ('PRA', 'RA', 'PA', 'PR')
 
     Returns:
         Tuple of (filtered_df, full_df):
@@ -207,13 +208,22 @@ def get_players_playing_today(s3_handler, teams_playing, league_leaders_df):
     """
     from s3_utils import S3_PLAYER_BUCKET
 
-    logger.info("Loading processed data and filtering for today's players...")
+    # Data file paths based on stat type
+    data_paths = {
+        'PRA': 'processed_data/processed_with_all_pct_10-51.csv',
+        'RA': 'processed_data_ra/processed_with_ra_pct_5-26.csv',
+        'PA': 'processed_data_pa/processed_with_pa_pct_5-39.csv',
+        'PR': 'processed_data_pr/processed_with_pr_pct_5-39.csv',
+    }
+
+    data_path = data_paths.get(stat_type.upper())
+    if not data_path:
+        raise ValueError(f"Invalid stat_type: {stat_type}")
+
+    logger.info(f"Loading {stat_type} processed data and filtering for today's players...")
 
     # Download processed data with all percentages
-    df = s3_handler.download_dataframe(
-        S3_PLAYER_BUCKET,
-        'processed_data/processed_with_all_pct_10-51.csv'
-    )
+    df = s3_handler.download_dataframe(S3_PLAYER_BUCKET, data_path)
 
     logger.info(f"Loaded {len(df):,} rows from processed data")
 
@@ -260,29 +270,47 @@ def get_players_playing_today(s3_handler, teams_playing, league_leaders_df):
 # 4.3: LOAD MODELS FROM S3
 # ============================================================================
 
-def load_all_models(s3_handler, threshold_start=10, threshold_end=52):
+def load_all_models(s3_handler, stat_type='PRA', threshold_start=None, threshold_end=None):
     """
-    Load all trained models from S3.
+    Load all trained models from S3 for a specific stat type.
 
     Args:
         s3_handler: S3Handler instance
-        threshold_start: Starting threshold (default: 10)
-        threshold_end: Ending threshold (exclusive, default: 52 for 10-51)
+        stat_type: Stat type ('PRA', 'RA', 'PA', 'PR')
+        threshold_start: Starting threshold (default: depends on stat_type)
+        threshold_end: Ending threshold (exclusive, default: depends on stat_type)
 
     Returns:
-        dict: {10: model_10, 11: model_11, ..., 51: model_51}
+        dict: {threshold: model, ...}
     """
     from s3_utils import S3_MODEL_BUCKET
     import pickle
 
-    logger.info(f"Loading models for thresholds {threshold_start}-{threshold_end-1}...")
+    # Default thresholds based on stat type
+    stat_configs = {
+        'PRA': {'start': 10, 'end': 52, 'folder': 'models', 'prefix': 'xgb_pra'},
+        'RA': {'start': 5, 'end': 27, 'folder': 'models_ra', 'prefix': 'xgb_ra'},
+        'PA': {'start': 5, 'end': 40, 'folder': 'models_pa', 'prefix': 'xgb_pa'},
+        'PR': {'start': 5, 'end': 40, 'folder': 'models_pr', 'prefix': 'xgb_pr'},
+    }
+
+    config = stat_configs.get(stat_type.upper())
+    if not config:
+        raise ValueError(f"Invalid stat_type: {stat_type}. Must be one of {list(stat_configs.keys())}")
+
+    if threshold_start is None:
+        threshold_start = config['start']
+    if threshold_end is None:
+        threshold_end = config['end']
+
+    logger.info(f"Loading {stat_type} models for thresholds {threshold_start}-{threshold_end-1}...")
 
     models = {}
 
     for threshold in range(threshold_start, threshold_end):
         try:
             # List all model files for this threshold
-            model_prefix = f'models/xgb_pra_{threshold}plus_'
+            model_prefix = f"{config['folder']}/{config['prefix']}_{threshold}plus_"
 
             # Get list of objects with this prefix
             s3_client = s3_handler.s3_client
@@ -311,7 +339,7 @@ def load_all_models(s3_handler, threshold_start=10, threshold_end=52):
             logger.warning(f"  Error loading model for threshold {threshold}: {e}")
             continue
 
-    logger.info(f"✓ Loaded {len(models)} models from S3")
+    logger.info(f"✓ Loaded {len(models)} {stat_type} models from S3")
     return models
 
 
@@ -492,45 +520,22 @@ def prepare_model_input(features_dict, model):
     return X
 
 
-def run_gauntlet_for_player(player_row, models, team_matchups, full_df):
+def run_pra_over_gauntlet(reconstructed_features, models):
     """
-    Run model gauntlet for a single player using reconstructed features.
+    Run OVER gauntlet for PRA starting from lowest threshold.
 
     Args:
-        player_row: DataFrame row with player data and all percentage columns
-        models: Dictionary of loaded models
-        team_matchups: Matchup info from RotoWire
-        full_df: Full processed dataset for feature reconstruction
+        reconstructed_features: Dict of reconstructed PRA features
+        models: Dict of loaded PRA models
 
     Returns:
-        dict or None: Prediction result if passed threshold, else None
+        dict or None: Prediction result if passed threshold
     """
-    player_id = player_row['Player_ID']
-    player_name = player_row['PLAYER']
-    team = player_row['TEAM']
-
-    # Get matchup info
-    matchup_info = team_matchups.get(team)
-    if not matchup_info:
-        logger.warning(f"  No matchup info for {player_name} ({team})")
-        return None
-
-    opponent = matchup_info['opponent']
-    is_home = matchup_info['is_home']
-    matchup_str = f"{team} {'vs' if is_home else '@'} {opponent}"
-
-    # Reconstruct features including current game's PRA for all thresholds
     thresholds = sorted(models.keys())
-    reconstructed_features = reconstruct_features_for_prediction(
-        player_row, full_df, thresholds, opponent  # Pass today's opponent
-    )
-
-    # Run gauntlet (start at 10, go until failure)
     highest_passed = None
     final_probability = 0.0
 
     for threshold in thresholds:
-        # Get features for this threshold (base + threshold-specific percentages)
         threshold_features = {
             'Player_ID': reconstructed_features['Player_ID'],
             'LINEUP_ID': reconstructed_features['LINEUP_ID'],
@@ -551,44 +556,191 @@ def run_gauntlet_for_player(player_row, models, team_matchups, full_df):
             f'h2h_pct_{threshold}': reconstructed_features[f'h2h_pct_{threshold}']
         }
 
-        # Prepare input for model
         try:
             X = prepare_model_input(threshold_features, models[threshold])
-
-            # Get prediction probability
             prob = models[threshold].predict_proba(X)[0][1]
 
-            # Check if passed threshold
             if prob >= CONFIDENCE_THRESHOLD:
                 highest_passed = threshold
                 final_probability = prob
             else:
-                # Failed - stop gauntlet
                 break
-
         except Exception as e:
-            logger.warning(f"  Error predicting for {player_name} at threshold {threshold}: {e}")
+            logger.warning(f"  Error predicting at PRA threshold {threshold}: {e}")
             break
 
-    # If passed at least one threshold, create prediction
     if highest_passed is not None:
-        logger.info(f"  ✓ {player_name}: Passed up to {highest_passed}+ PRA (prob={final_probability:.3f})")
-        return {
+        line = highest_passed - 0.5
+        # PRA line range: 9.5 to 50.5
+        if line > 9:
+            return {
+                'prop_type': 'OVER',
+                'line': line,
+                'threshold': highest_passed,
+                'confidence': final_probability
+            }
+    return None
+
+
+def run_pra_under_gauntlet(reconstructed_features, models):
+    """
+    Run UNDER gauntlet for PRA starting from high threshold.
+
+    Args:
+        reconstructed_features: Dict of reconstructed PRA features
+        models: Dict of loaded PRA models
+
+    Returns:
+        dict or None: Prediction result if passed threshold
+    """
+    thresholds = sorted(models.keys())
+    season_avg = reconstructed_features.get('season_avg', 0)
+    max_threshold = max(thresholds) if thresholds else 51
+    starting_threshold = min(max_threshold, max(15, int(season_avg) + 5))
+
+    lowest_passed = None
+    under_confidence = 0.0
+
+    for threshold in reversed(thresholds):
+        if threshold > starting_threshold:
+            continue
+
+        threshold_features = {
+            'Player_ID': reconstructed_features['Player_ID'],
+            'LINEUP_ID': reconstructed_features['LINEUP_ID'],
+            'lineup_average': reconstructed_features['lineup_average'],
+            'last_5_avg': reconstructed_features['last_5_avg'],
+            'last_10_avg': reconstructed_features['last_10_avg'],
+            'last_20_avg': reconstructed_features['last_20_avg'],
+            'season_avg': reconstructed_features['season_avg'],
+            'last_season_avg': reconstructed_features['last_season_avg'],
+            'h2h_avg': reconstructed_features['h2h_avg'],
+            'opp_strength': reconstructed_features['opp_strength'],
+            f'last_5_pct_{threshold}': reconstructed_features[f'last_5_pct_{threshold}'],
+            f'last_10_pct_{threshold}': reconstructed_features[f'last_10_pct_{threshold}'],
+            f'last_20_pct_{threshold}': reconstructed_features[f'last_20_pct_{threshold}'],
+            f'season_pct_{threshold}': reconstructed_features[f'season_pct_{threshold}'],
+            f'last_season_pct_{threshold}': reconstructed_features[f'last_season_pct_{threshold}'],
+            f'lineup_pct_{threshold}': reconstructed_features[f'lineup_pct_{threshold}'],
+            f'h2h_pct_{threshold}': reconstructed_features[f'h2h_pct_{threshold}']
+        }
+
+        try:
+            X = prepare_model_input(threshold_features, models[threshold])
+            prob = models[threshold].predict_proba(X)[0][1]
+
+            if prob <= (1 - CONFIDENCE_THRESHOLD):
+                lowest_passed = threshold
+                under_confidence = 1 - prob
+            else:
+                break
+        except Exception as e:
+            logger.warning(f"  Error predicting UNDER at PRA threshold {threshold}: {e}")
+            break
+
+    if lowest_passed is not None:
+        line = lowest_passed + 0.5
+        # PRA line range: 9.5 to 50.5
+        if line > 9:
+            return {
+                'prop_type': 'UNDER',
+                'line': line,
+                'threshold': lowest_passed,
+                'confidence': under_confidence
+            }
+    return None
+
+
+def run_gauntlet_for_player(player_row, models, team_matchups, full_df):
+    """
+    Run PRA gauntlet (OVER and UNDER) for a single player using reconstructed features.
+
+    Args:
+        player_row: DataFrame row with player data and all percentage columns
+        models: Dictionary of loaded models
+        team_matchups: Matchup info from RotoWire
+        full_df: Full processed dataset for feature reconstruction
+
+    Returns:
+        list: List of prediction dicts (can be 0, 1, or 2 predictions)
+    """
+    player_id = player_row['Player_ID']
+    player_name = player_row['PLAYER']
+    team = player_row['TEAM']
+
+    # Get matchup info
+    matchup_info = team_matchups.get(team)
+    if not matchup_info:
+        logger.warning(f"  No matchup info for {player_name} ({team})")
+        return []
+
+    opponent = matchup_info['opponent']
+    is_home = matchup_info['is_home']
+    matchup_str = f"{team} {'vs' if is_home else '@'} {opponent}"
+
+    # Reconstruct features including current game's PRA for all thresholds
+    thresholds = sorted(models.keys())
+    reconstructed_features = reconstruct_features_for_prediction(
+        player_row, full_df, thresholds, opponent  # Pass today's opponent
+    )
+
+    # Run both gauntlets
+    over_pred = run_pra_over_gauntlet(reconstructed_features, models)
+    under_pred = run_pra_under_gauntlet(reconstructed_features, models)
+
+    # Build prediction list
+    predictions = []
+
+    if over_pred:
+        predictions.append({
             'NAME': player_name,
             'MATCHUP': matchup_str,
             'GAME_DATE': datetime.today().strftime('%b %d, %Y'),
-            'PROP': f"Over {highest_passed - 0.5} PRA",
-            'LINE': highest_passed - 0.5,
-            'CONFIDENCE_SCORE': final_probability,
+            'PROP': f"Over {over_pred['line']} PRA",
+            'LINE': over_pred['line'],
+            'CONFIDENCE_SCORE': over_pred['confidence'],
             'PLAYER_ID': player_id,
             'OPPONENT': opponent,
-            'THRESHOLD': highest_passed,
-            'player_row': player_row,  # Keep for display metrics
-            'reconstructed_features': reconstructed_features  # Keep reconstructed features
-        }
-    else:
-        logger.info(f"  ✗ {player_name}: Failed gauntlet (no predictions)")
-        return None
+            'THRESHOLD': over_pred['threshold'],
+            'player_row': player_row,
+            'reconstructed_features': reconstructed_features
+        })
+        logger.info(f"  ✓ {player_name}: OVER {over_pred['line']} PRA (prob={over_pred['confidence']:.3f})")
+
+    if under_pred:
+        predictions.append({
+            'NAME': player_name,
+            'MATCHUP': matchup_str,
+            'GAME_DATE': datetime.today().strftime('%b %d, %Y'),
+            'PROP': f"Under {under_pred['line']} PRA",
+            'LINE': under_pred['line'],
+            'CONFIDENCE_SCORE': under_pred['confidence'],
+            'PLAYER_ID': player_id,
+            'OPPONENT': opponent,
+            'THRESHOLD': under_pred['threshold'],
+            'player_row': player_row,
+            'reconstructed_features': reconstructed_features
+        })
+        logger.info(f"  ✓ {player_name}: UNDER {under_pred['line']} PRA (prob={under_pred['confidence']:.3f})")
+
+    # Check separation if both predictions exist
+    if len(predictions) == 2:
+        separation = abs(under_pred['line'] - over_pred['line'])
+        if separation < 4.0:
+            # Keep only higher confidence
+            if over_pred['confidence'] >= under_pred['confidence']:
+                logger.info(f"  ℹ Keeping OVER only (separation={separation:.1f}, higher confidence)")
+                predictions = [predictions[0]]  # Keep OVER
+            else:
+                logger.info(f"  ℹ Keeping UNDER only (separation={separation:.1f}, higher confidence)")
+                predictions = [predictions[1]]  # Keep UNDER
+        else:
+            logger.info(f"  ✓ Keeping BOTH predictions (separation={separation:.1f})")
+
+    if len(predictions) == 0:
+        logger.info(f"  ✗ {player_name}: No PRA predictions passed threshold")
+
+    return predictions
 
 
 # ============================================================================
@@ -604,15 +756,1082 @@ def calculate_display_metrics(reconstructed_features, threshold):
         threshold: PRA threshold
 
     Returns:
-        dict: Performance rates
+        dict: Performance rates including lineup_pct and opp_strength
     """
     return {
         'LAST_5': reconstructed_features.get(f'last_5_pct_{threshold}', 0),
         'LAST_10': reconstructed_features.get(f'last_10_pct_{threshold}', 0),
         'THIS_SEASON': reconstructed_features.get(f'season_pct_{threshold}', 0),
         'LAST_SEASON': reconstructed_features.get(f'last_season_pct_{threshold}', 0),
-        'H2H': reconstructed_features.get(f'h2h_pct_{threshold}', 0)
+        'H2H': reconstructed_features.get(f'h2h_pct_{threshold}', 0),
+        'LINEUP_PCT': reconstructed_features.get(f'lineup_pct_{threshold}', 0),
+        'OPP_STRENGTH': reconstructed_features.get('opp_strength', 0)
     }
+
+
+# ============================================================================
+# RA GAUNTLET FUNCTIONS (Rebounds + Assists)
+# ============================================================================
+
+def reconstruct_features_for_ra_prediction(player_row, full_df, thresholds, opponent):
+    """
+    Reconstruct RA-specific features for prediction.
+
+    Args:
+        player_row: DataFrame row with player data
+        full_df: Full RA processed dataset
+        thresholds: List of RA thresholds to reconstruct (5-26)
+        opponent: Opponent team abbreviation
+
+    Returns:
+        dict: Reconstructed features for RA prediction
+    """
+    player_id = player_row['Player_ID']
+    lineup_id = player_row['LINEUP_ID']
+    team = player_row['TEAM']
+    current_season = 22024  # 2024-25 season
+
+    # Filter player's historical games
+    player_all_games = full_df[full_df['Player_ID'] == player_id].copy()
+
+    if len(player_all_games) == 0:
+        logger.warning(f"  No historical data for player {player_id}")
+        return None
+
+    # Sort by game date
+    player_all_games = player_all_games.sort_values('GAME_DATE_PARSED')
+
+    # Get current season games (before today)
+    player_season_games = player_all_games[player_all_games['SEASON_ID'] == current_season].copy()
+    player_team_games = player_season_games[player_season_games['TEAM'] == team].copy()
+
+    # Get lineup games
+    player_lineup_games = player_team_games[player_team_games['LINEUP_ID'] == lineup_id].copy()
+
+    # Get H2H games (against today's opponent) - RA data uses 'OPPONENT' not 'OPP'
+    player_h2h_games = player_team_games[player_team_games['OPPONENT'] == opponent].copy()
+
+    # Base features
+    features = {
+        'Player_ID': player_id,
+        'LINEUP_ID': lineup_id,
+    }
+
+    # Rolling averages
+    features['last_5_avg'] = player_team_games.tail(5)['RA'].mean() if len(player_team_games) >= 5 else player_team_games['RA'].mean()
+    features['last_10_avg'] = player_team_games.tail(10)['RA'].mean() if len(player_team_games) >= 10 else player_team_games['RA'].mean()
+    features['last_20_avg'] = player_team_games.tail(20)['RA'].mean() if len(player_team_games) >= 20 else player_team_games['RA'].mean()
+    features['season_avg'] = player_season_games['RA'].mean() if len(player_season_games) > 0 else 0
+
+    # Last season average
+    last_season_id = current_season - 1
+    player_last_season_games = player_all_games[player_all_games['SEASON_ID'] == last_season_id]
+    features['last_season_avg'] = player_last_season_games['RA'].mean() if len(player_last_season_games) > 0 else 0
+
+    features['lineup_average'] = player_lineup_games['RA'].mean() if len(player_lineup_games) > 0 else 0
+    features['h2h_avg'] = player_h2h_games['RA'].mean() if len(player_h2h_games) > 0 else 0
+
+    # Opponent strength (simplified)
+    features['opp_strength'] = 0.0
+
+    # Threshold-specific percentage features
+    for threshold in thresholds:
+        # Last 5 games
+        last_5_games = player_team_games.tail(5)
+        features[f'last_5_pct_{threshold}'] = (
+            (last_5_games['RA'] >= threshold).mean() if len(last_5_games) > 0 else 0
+        )
+
+        # Last 10 games
+        last_10_games = player_team_games.tail(10)
+        features[f'last_10_pct_{threshold}'] = (
+            (last_10_games['RA'] >= threshold).mean() if len(last_10_games) > 0 else 0
+        )
+
+        # Last 20 games
+        last_20_games = player_team_games.tail(20)
+        features[f'last_20_pct_{threshold}'] = (
+            (last_20_games['RA'] >= threshold).mean() if len(last_20_games) > 0 else 0
+        )
+
+        # Season percentage
+        features[f'season_pct_{threshold}'] = (
+            (player_season_games['RA'] >= threshold).mean() if len(player_season_games) > 0 else 0
+        )
+
+        # Last season percentage - get from latest game if available
+        if len(player_team_games) > 0:
+            latest_game = player_team_games.iloc[-1]
+            features[f'last_season_pct_{threshold}'] = latest_game.get(f'last_season_pct_{threshold}', 0)
+        else:
+            features[f'last_season_pct_{threshold}'] = 0
+
+        # Lineup percentage (with fallback logic)
+        if len(player_lineup_games) > 1:
+            features[f'lineup_pct_{threshold}'] = (
+                (player_lineup_games['RA'] >= threshold).mean()
+            )
+        elif len(player_lineup_games) == 1:
+            # Fallback to first game with different lineup
+            player_team_history = player_team_games.copy()
+            if len(player_team_history) > 0:
+                player_team_sorted = player_team_history.sort_values('GAME_DATE_PARSED')
+                lineup_changed = player_team_sorted['LINEUP_ID'].ne(player_team_sorted['LINEUP_ID'].shift(1))
+                first_lineup_games = player_team_sorted[lineup_changed]
+                if len(first_lineup_games) > 0:
+                    features[f'lineup_pct_{threshold}'] = (
+                        (first_lineup_games['RA'] >= threshold).mean()
+                    )
+                else:
+                    features[f'lineup_pct_{threshold}'] = 0.0
+            else:
+                features[f'lineup_pct_{threshold}'] = 0.0
+        else:
+            features[f'lineup_pct_{threshold}'] = 0.0
+
+        # H2H percentage
+        features[f'h2h_pct_{threshold}'] = (
+            (player_h2h_games['RA'] >= threshold).mean() if len(player_h2h_games) > 0 else 0
+        )
+
+    return features
+
+
+def run_ra_over_gauntlet(reconstructed_features, models):
+    """
+    Run OVER gauntlet for RA starting from lowest threshold.
+
+    Args:
+        reconstructed_features: Dict of reconstructed RA features
+        models: Dict of loaded RA models
+
+    Returns:
+        dict or None: Prediction result if passed threshold
+    """
+    thresholds = sorted(models.keys())
+    highest_passed = None
+    final_probability = 0.0
+
+    for threshold in thresholds:
+        threshold_features = {
+            'Player_ID': reconstructed_features['Player_ID'],
+            'LINEUP_ID': reconstructed_features['LINEUP_ID'],
+            'lineup_average': reconstructed_features['lineup_average'],
+            'last_5_avg': reconstructed_features['last_5_avg'],
+            'last_10_avg': reconstructed_features['last_10_avg'],
+            'last_20_avg': reconstructed_features['last_20_avg'],
+            'season_avg': reconstructed_features['season_avg'],
+            'last_season_avg': reconstructed_features['last_season_avg'],
+            'h2h_avg': reconstructed_features['h2h_avg'],
+            'opp_strength': reconstructed_features['opp_strength'],
+            f'last_5_pct_{threshold}': reconstructed_features[f'last_5_pct_{threshold}'],
+            f'last_10_pct_{threshold}': reconstructed_features[f'last_10_pct_{threshold}'],
+            f'last_20_pct_{threshold}': reconstructed_features[f'last_20_pct_{threshold}'],
+            f'season_pct_{threshold}': reconstructed_features[f'season_pct_{threshold}'],
+            f'last_season_pct_{threshold}': reconstructed_features[f'last_season_pct_{threshold}'],
+            f'lineup_pct_{threshold}': reconstructed_features[f'lineup_pct_{threshold}'],
+            f'h2h_pct_{threshold}': reconstructed_features[f'h2h_pct_{threshold}']
+        }
+
+        try:
+            X = prepare_model_input(threshold_features, models[threshold])
+            prob = models[threshold].predict_proba(X)[0][1]
+
+            if prob >= CONFIDENCE_THRESHOLD:
+                highest_passed = threshold
+                final_probability = prob
+            else:
+                break
+        except Exception as e:
+            logger.warning(f"  Error predicting at RA threshold {threshold}: {e}")
+            break
+
+    if highest_passed is not None:
+        line = highest_passed - 0.5
+        # RA line range: 4.5 to 25.5
+        if line >= 4.5 and line <= 25.5:
+            return {
+                'prop_type': 'OVER',
+                'line': line,
+                'threshold': highest_passed,
+                'confidence': final_probability
+            }
+    return None
+
+
+def run_ra_under_gauntlet(reconstructed_features, models):
+    """
+    Run UNDER gauntlet for RA starting from high threshold.
+
+    Args:
+        reconstructed_features: Dict of reconstructed RA features
+        models: Dict of loaded RA models
+
+    Returns:
+        dict or None: Prediction result if passed threshold
+    """
+    thresholds = sorted(models.keys())
+    season_avg = reconstructed_features.get('season_avg', 0)
+    max_threshold = max(thresholds) if thresholds else 26
+    starting_threshold = min(max_threshold, max(10, int(season_avg) + 5))
+
+    lowest_passed = None
+    under_confidence = 0.0
+
+    for threshold in reversed(thresholds):
+        if threshold > starting_threshold:
+            continue
+
+        threshold_features = {
+            'Player_ID': reconstructed_features['Player_ID'],
+            'LINEUP_ID': reconstructed_features['LINEUP_ID'],
+            'lineup_average': reconstructed_features['lineup_average'],
+            'last_5_avg': reconstructed_features['last_5_avg'],
+            'last_10_avg': reconstructed_features['last_10_avg'],
+            'last_20_avg': reconstructed_features['last_20_avg'],
+            'season_avg': reconstructed_features['season_avg'],
+            'last_season_avg': reconstructed_features['last_season_avg'],
+            'h2h_avg': reconstructed_features['h2h_avg'],
+            'opp_strength': reconstructed_features['opp_strength'],
+            f'last_5_pct_{threshold}': reconstructed_features[f'last_5_pct_{threshold}'],
+            f'last_10_pct_{threshold}': reconstructed_features[f'last_10_pct_{threshold}'],
+            f'last_20_pct_{threshold}': reconstructed_features[f'last_20_pct_{threshold}'],
+            f'season_pct_{threshold}': reconstructed_features[f'season_pct_{threshold}'],
+            f'last_season_pct_{threshold}': reconstructed_features[f'last_season_pct_{threshold}'],
+            f'lineup_pct_{threshold}': reconstructed_features[f'lineup_pct_{threshold}'],
+            f'h2h_pct_{threshold}': reconstructed_features[f'h2h_pct_{threshold}']
+        }
+
+        try:
+            X = prepare_model_input(threshold_features, models[threshold])
+            prob = models[threshold].predict_proba(X)[0][1]
+
+            if prob <= (1 - CONFIDENCE_THRESHOLD):
+                lowest_passed = threshold
+                under_confidence = 1 - prob
+            else:
+                break
+        except Exception as e:
+            logger.warning(f"  Error predicting UNDER at RA threshold {threshold}: {e}")
+            break
+
+    if lowest_passed is not None:
+        line = lowest_passed + 0.5
+        # RA line range: 4.5 to 25.5
+        if line >= 4.5 and line <= 25.5:
+            return {
+                'prop_type': 'UNDER',
+                'line': line,
+                'threshold': lowest_passed,
+                'confidence': under_confidence
+            }
+    return None
+
+
+def run_ra_gauntlet_for_player(player_row, models, team_matchups, full_df):
+    """
+    Run RA gauntlet (OVER and UNDER) for a single player.
+
+    Args:
+        player_row: DataFrame row with player data
+        models: Dictionary of loaded RA models
+        team_matchups: Matchup info from RotoWire
+        full_df: Full RA processed dataset
+
+    Returns:
+        list: List of prediction dicts (can be 0, 1, or 2 predictions)
+    """
+    player_id = player_row['Player_ID']
+    player_name = player_row['PLAYER']
+    team = player_row['TEAM']
+
+    # Get matchup info
+    matchup_info = team_matchups.get(team)
+    if not matchup_info:
+        logger.warning(f"  No matchup info for {player_name} ({team})")
+        return []
+
+    opponent = matchup_info['opponent']
+    is_home = matchup_info['is_home']
+    matchup_str = f"{team} {'vs' if is_home else '@'} {opponent}"
+
+    # Reconstruct features for RA
+    thresholds = sorted(models.keys())
+    reconstructed_features = reconstruct_features_for_ra_prediction(
+        player_row, full_df, thresholds, opponent
+    )
+
+    if reconstructed_features is None:
+        logger.warning(f"  Failed to reconstruct RA features for {player_name}")
+        return []
+
+    # Run both gauntlets
+    over_pred = run_ra_over_gauntlet(reconstructed_features, models)
+    under_pred = run_ra_under_gauntlet(reconstructed_features, models)
+
+    # Build prediction list
+    predictions = []
+
+    if over_pred:
+        predictions.append({
+            'NAME': player_name,
+            'MATCHUP': matchup_str,
+            'GAME_DATE': datetime.today().strftime('%b %d, %Y'),
+            'PROP': f"Over {over_pred['line']} RA",
+            'LINE': over_pred['line'],
+            'CONFIDENCE_SCORE': over_pred['confidence'],
+            'PLAYER_ID': player_id,
+            'OPPONENT': opponent,
+            'THRESHOLD': over_pred['threshold'],
+            'player_row': player_row,
+            'reconstructed_features': reconstructed_features
+        })
+        logger.info(f"  ✓ {player_name}: OVER {over_pred['line']} RA (prob={over_pred['confidence']:.3f})")
+
+    if under_pred:
+        predictions.append({
+            'NAME': player_name,
+            'MATCHUP': matchup_str,
+            'GAME_DATE': datetime.today().strftime('%b %d, %Y'),
+            'PROP': f"Under {under_pred['line']} RA",
+            'LINE': under_pred['line'],
+            'CONFIDENCE_SCORE': under_pred['confidence'],
+            'PLAYER_ID': player_id,
+            'OPPONENT': opponent,
+            'THRESHOLD': under_pred['threshold'],
+            'player_row': player_row,
+            'reconstructed_features': reconstructed_features
+        })
+        logger.info(f"  ✓ {player_name}: UNDER {under_pred['line']} RA (prob={under_pred['confidence']:.3f})")
+
+    # Check separation if both predictions exist
+    if len(predictions) == 2:
+        separation = abs(under_pred['line'] - over_pred['line'])
+        if separation < 4.0:
+            # Keep only higher confidence
+            if over_pred['confidence'] >= under_pred['confidence']:
+                logger.info(f"  ℹ Keeping OVER only (separation={separation:.1f}, higher confidence)")
+                predictions = [predictions[0]]  # Keep OVER
+            else:
+                logger.info(f"  ℹ Keeping UNDER only (separation={separation:.1f}, higher confidence)")
+                predictions = [predictions[1]]  # Keep UNDER
+        else:
+            logger.info(f"  ✓ Keeping BOTH predictions (separation={separation:.1f})")
+
+    if len(predictions) == 0:
+        logger.info(f"  ✗ {player_name}: No RA predictions passed threshold")
+
+    return predictions
+
+
+# ============================================================================
+# PA GAUNTLET FUNCTIONS (Points + Assists)
+# ============================================================================
+
+def reconstruct_features_for_pa_prediction(player_row, full_df, thresholds, opponent):
+    """
+    Reconstruct PA-specific features for prediction.
+
+    Args:
+        player_row: DataFrame row with player data
+        full_df: Full PA processed dataset
+        thresholds: List of PA thresholds to reconstruct (5-39)
+        opponent: Opponent team abbreviation
+
+    Returns:
+        dict: Reconstructed features for PA prediction
+    """
+    player_id = player_row['Player_ID']
+    lineup_id = player_row['LINEUP_ID']
+    team = player_row['TEAM']
+    current_season = 22024  # 2024-25 season
+
+    # Filter player's historical games
+    player_all_games = full_df[full_df['Player_ID'] == player_id].copy()
+
+    if len(player_all_games) == 0:
+        logger.warning(f"  No historical data for player {player_id}")
+        return None
+
+    # Sort by game date
+    player_all_games = player_all_games.sort_values('GAME_DATE_PARSED')
+
+    # Get current season games (before today)
+    player_season_games = player_all_games[player_all_games['SEASON_ID'] == current_season].copy()
+    player_team_games = player_season_games[player_season_games['TEAM'] == team].copy()
+
+    # Get lineup games
+    player_lineup_games = player_team_games[player_team_games['LINEUP_ID'] == lineup_id].copy()
+
+    # Get H2H games (against today's opponent)
+    player_h2h_games = player_team_games[player_team_games['OPPONENT'] == opponent].copy()
+
+    # Base features
+    features = {
+        'Player_ID': player_id,
+        'LINEUP_ID': lineup_id,
+    }
+
+    # Rolling averages
+    features['last_5_avg'] = player_team_games.tail(5)['PA'].mean() if len(player_team_games) >= 5 else player_team_games['PA'].mean()
+    features['last_10_avg'] = player_team_games.tail(10)['PA'].mean() if len(player_team_games) >= 10 else player_team_games['PA'].mean()
+    features['last_20_avg'] = player_team_games.tail(20)['PA'].mean() if len(player_team_games) >= 20 else player_team_games['PA'].mean()
+    features['season_avg'] = player_season_games['PA'].mean() if len(player_season_games) > 0 else 0
+
+    # Last season average
+    last_season_id = current_season - 1
+    player_last_season_games = player_all_games[player_all_games['SEASON_ID'] == last_season_id]
+    features['last_season_avg'] = player_last_season_games['PA'].mean() if len(player_last_season_games) > 0 else 0
+
+    features['lineup_average'] = player_lineup_games['PA'].mean() if len(player_lineup_games) > 0 else 0
+    features['h2h_avg'] = player_h2h_games['PA'].mean() if len(player_h2h_games) > 0 else 0
+
+    # Opponent strength (simplified)
+    features['opp_strength'] = 0.0
+
+    # Threshold-specific percentage features
+    for threshold in thresholds:
+        # Last 5 games
+        last_5_games = player_team_games.tail(5)
+        features[f'last_5_pct_{threshold}'] = (
+            (last_5_games['PA'] >= threshold).mean() if len(last_5_games) > 0 else 0
+        )
+
+        # Last 10 games
+        last_10_games = player_team_games.tail(10)
+        features[f'last_10_pct_{threshold}'] = (
+            (last_10_games['PA'] >= threshold).mean() if len(last_10_games) > 0 else 0
+        )
+
+        # Last 20 games
+        last_20_games = player_team_games.tail(20)
+        features[f'last_20_pct_{threshold}'] = (
+            (last_20_games['PA'] >= threshold).mean() if len(last_20_games) > 0 else 0
+        )
+
+        # Season percentage
+        features[f'season_pct_{threshold}'] = (
+            (player_season_games['PA'] >= threshold).mean() if len(player_season_games) > 0 else 0
+        )
+
+        # Last season percentage - get from latest game if available
+        if len(player_team_games) > 0:
+            latest_game = player_team_games.iloc[-1]
+            features[f'last_season_pct_{threshold}'] = latest_game.get(f'last_season_pct_{threshold}', 0)
+        else:
+            features[f'last_season_pct_{threshold}'] = 0
+
+        # Lineup percentage (with fallback logic)
+        if len(player_lineup_games) > 1:
+            features[f'lineup_pct_{threshold}'] = (
+                (player_lineup_games['PA'] >= threshold).mean()
+            )
+        elif len(player_lineup_games) == 1:
+            # Fallback to first game with different lineup
+            player_team_history = player_team_games.copy()
+            if len(player_team_history) > 0:
+                player_team_sorted = player_team_history.sort_values('GAME_DATE_PARSED')
+                lineup_changed = player_team_sorted['LINEUP_ID'].ne(player_team_sorted['LINEUP_ID'].shift(1))
+                first_lineup_games = player_team_sorted[lineup_changed]
+                if len(first_lineup_games) > 0:
+                    features[f'lineup_pct_{threshold}'] = (
+                        (first_lineup_games['PA'] >= threshold).mean()
+                    )
+                else:
+                    features[f'lineup_pct_{threshold}'] = 0.0
+            else:
+                features[f'lineup_pct_{threshold}'] = 0.0
+        else:
+            features[f'lineup_pct_{threshold}'] = 0.0
+
+        # H2H percentage
+        features[f'h2h_pct_{threshold}'] = (
+            (player_h2h_games['PA'] >= threshold).mean() if len(player_h2h_games) > 0 else 0
+        )
+
+    return features
+
+
+def run_pa_over_gauntlet(reconstructed_features, models):
+    """
+    Run OVER gauntlet for PA starting from lowest threshold.
+
+    Args:
+        reconstructed_features: Dict of reconstructed PA features
+        models: Dict of loaded PA models
+
+    Returns:
+        dict or None: Prediction result if passed threshold
+    """
+    thresholds = sorted(models.keys())
+    highest_passed = None
+    final_probability = 0.0
+
+    for threshold in thresholds:
+        threshold_features = {
+            'Player_ID': reconstructed_features['Player_ID'],
+            'LINEUP_ID': reconstructed_features['LINEUP_ID'],
+            'lineup_average': reconstructed_features['lineup_average'],
+            'last_5_avg': reconstructed_features['last_5_avg'],
+            'last_10_avg': reconstructed_features['last_10_avg'],
+            'last_20_avg': reconstructed_features['last_20_avg'],
+            'season_avg': reconstructed_features['season_avg'],
+            'last_season_avg': reconstructed_features['last_season_avg'],
+            'h2h_avg': reconstructed_features['h2h_avg'],
+            'opp_strength': reconstructed_features['opp_strength'],
+            f'last_5_pct_{threshold}': reconstructed_features[f'last_5_pct_{threshold}'],
+            f'last_10_pct_{threshold}': reconstructed_features[f'last_10_pct_{threshold}'],
+            f'last_20_pct_{threshold}': reconstructed_features[f'last_20_pct_{threshold}'],
+            f'season_pct_{threshold}': reconstructed_features[f'season_pct_{threshold}'],
+            f'last_season_pct_{threshold}': reconstructed_features[f'last_season_pct_{threshold}'],
+            f'lineup_pct_{threshold}': reconstructed_features[f'lineup_pct_{threshold}'],
+            f'h2h_pct_{threshold}': reconstructed_features[f'h2h_pct_{threshold}']
+        }
+
+        try:
+            X = prepare_model_input(threshold_features, models[threshold])
+            prob = models[threshold].predict_proba(X)[0][1]
+
+            if prob >= CONFIDENCE_THRESHOLD:
+                highest_passed = threshold
+                final_probability = prob
+            else:
+                break
+        except Exception as e:
+            logger.warning(f"  Error predicting at PA threshold {threshold}: {e}")
+            break
+
+    if highest_passed is not None:
+        line = highest_passed - 0.5
+        # PA line range: 4.5 to 38.5
+        if line >= 4.5 and line <= 38.5:
+            return {
+                'prop_type': 'OVER',
+                'line': line,
+                'threshold': highest_passed,
+                'confidence': final_probability
+            }
+    return None
+
+
+def run_pa_under_gauntlet(reconstructed_features, models):
+    """
+    Run UNDER gauntlet for PA starting from high threshold.
+
+    Args:
+        reconstructed_features: Dict of reconstructed PA features
+        models: Dict of loaded PA models
+
+    Returns:
+        dict or None: Prediction result if passed threshold
+    """
+    thresholds = sorted(models.keys())
+    season_avg = reconstructed_features.get('season_avg', 0)
+    max_threshold = max(thresholds) if thresholds else 39
+    starting_threshold = min(max_threshold, max(10, int(season_avg) + 5))
+
+    lowest_passed = None
+    under_confidence = 0.0
+
+    for threshold in reversed(thresholds):
+        if threshold > starting_threshold:
+            continue
+
+        threshold_features = {
+            'Player_ID': reconstructed_features['Player_ID'],
+            'LINEUP_ID': reconstructed_features['LINEUP_ID'],
+            'lineup_average': reconstructed_features['lineup_average'],
+            'last_5_avg': reconstructed_features['last_5_avg'],
+            'last_10_avg': reconstructed_features['last_10_avg'],
+            'last_20_avg': reconstructed_features['last_20_avg'],
+            'season_avg': reconstructed_features['season_avg'],
+            'last_season_avg': reconstructed_features['last_season_avg'],
+            'h2h_avg': reconstructed_features['h2h_avg'],
+            'opp_strength': reconstructed_features['opp_strength'],
+            f'last_5_pct_{threshold}': reconstructed_features[f'last_5_pct_{threshold}'],
+            f'last_10_pct_{threshold}': reconstructed_features[f'last_10_pct_{threshold}'],
+            f'last_20_pct_{threshold}': reconstructed_features[f'last_20_pct_{threshold}'],
+            f'season_pct_{threshold}': reconstructed_features[f'season_pct_{threshold}'],
+            f'last_season_pct_{threshold}': reconstructed_features[f'last_season_pct_{threshold}'],
+            f'lineup_pct_{threshold}': reconstructed_features[f'lineup_pct_{threshold}'],
+            f'h2h_pct_{threshold}': reconstructed_features[f'h2h_pct_{threshold}']
+        }
+
+        try:
+            X = prepare_model_input(threshold_features, models[threshold])
+            prob = models[threshold].predict_proba(X)[0][1]
+
+            if prob <= (1 - CONFIDENCE_THRESHOLD):
+                lowest_passed = threshold
+                under_confidence = 1 - prob
+            else:
+                break
+        except Exception as e:
+            logger.warning(f"  Error predicting UNDER at PA threshold {threshold}: {e}")
+            break
+
+    if lowest_passed is not None:
+        line = lowest_passed + 0.5
+        # PA line range: 4.5 to 38.5
+        if line >= 4.5 and line <= 38.5:
+            return {
+                'prop_type': 'UNDER',
+                'line': line,
+                'threshold': lowest_passed,
+                'confidence': under_confidence
+            }
+    return None
+
+
+def run_pa_gauntlet_for_player(player_row, models, team_matchups, full_df):
+    """
+    Run PA gauntlet (OVER and UNDER) for a single player.
+
+    Args:
+        player_row: DataFrame row with player data
+        models: Dictionary of loaded PA models
+        team_matchups: Matchup info from RotoWire
+        full_df: Full PA processed dataset
+
+    Returns:
+        list: List of prediction dicts (can be 0, 1, or 2 predictions)
+    """
+    player_id = player_row['Player_ID']
+    player_name = player_row['PLAYER']
+    team = player_row['TEAM']
+
+    # Get matchup info
+    matchup_info = team_matchups.get(team)
+    if not matchup_info:
+        logger.warning(f"  No matchup info for {player_name} ({team})")
+        return []
+
+    opponent = matchup_info['opponent']
+    is_home = matchup_info['is_home']
+    matchup_str = f"{team} {'vs' if is_home else '@'} {opponent}"
+
+    # Reconstruct features for PA
+    thresholds = sorted(models.keys())
+    reconstructed_features = reconstruct_features_for_pa_prediction(
+        player_row, full_df, thresholds, opponent
+    )
+
+    if reconstructed_features is None:
+        logger.warning(f"  Failed to reconstruct PA features for {player_name}")
+        return []
+
+    # Run both gauntlets
+    over_pred = run_pa_over_gauntlet(reconstructed_features, models)
+    under_pred = run_pa_under_gauntlet(reconstructed_features, models)
+
+    # Build prediction list
+    predictions = []
+
+    if over_pred:
+        predictions.append({
+            'NAME': player_name,
+            'MATCHUP': matchup_str,
+            'GAME_DATE': datetime.today().strftime('%b %d, %Y'),
+            'PROP': f"Over {over_pred['line']} PA",
+            'LINE': over_pred['line'],
+            'CONFIDENCE_SCORE': over_pred['confidence'],
+            'PLAYER_ID': player_id,
+            'OPPONENT': opponent,
+            'THRESHOLD': over_pred['threshold'],
+            'player_row': player_row,
+            'reconstructed_features': reconstructed_features
+        })
+        logger.info(f"  ✓ {player_name}: OVER {over_pred['line']} PA (prob={over_pred['confidence']:.3f})")
+
+    if under_pred:
+        predictions.append({
+            'NAME': player_name,
+            'MATCHUP': matchup_str,
+            'GAME_DATE': datetime.today().strftime('%b %d, %Y'),
+            'PROP': f"Under {under_pred['line']} PA",
+            'LINE': under_pred['line'],
+            'CONFIDENCE_SCORE': under_pred['confidence'],
+            'PLAYER_ID': player_id,
+            'OPPONENT': opponent,
+            'THRESHOLD': under_pred['threshold'],
+            'player_row': player_row,
+            'reconstructed_features': reconstructed_features
+        })
+        logger.info(f"  ✓ {player_name}: UNDER {under_pred['line']} PA (prob={under_pred['confidence']:.3f})")
+
+    # Check separation if both predictions exist
+    if len(predictions) == 2:
+        separation = abs(under_pred['line'] - over_pred['line'])
+        if separation < 4.0:
+            # Keep only higher confidence
+            if over_pred['confidence'] >= under_pred['confidence']:
+                logger.info(f"  ℹ Keeping OVER only (separation={separation:.1f}, higher confidence)")
+                predictions = [predictions[0]]  # Keep OVER
+            else:
+                logger.info(f"  ℹ Keeping UNDER only (separation={separation:.1f}, higher confidence)")
+                predictions = [predictions[1]]  # Keep UNDER
+        else:
+            logger.info(f"  ✓ Keeping BOTH predictions (separation={separation:.1f})")
+
+    if len(predictions) == 0:
+        logger.info(f"  ✗ {player_name}: No PA predictions passed threshold")
+
+    return predictions
+
+
+# ============================================================================
+# PR GAUNTLET FUNCTIONS (Points + Rebounds)
+# ============================================================================
+
+def reconstruct_features_for_pr_prediction(player_row, full_df, thresholds, opponent):
+    """
+    Reconstruct PR-specific features for prediction.
+
+    Args:
+        player_row: DataFrame row with player data
+        full_df: Full PR processed dataset
+        thresholds: List of PR thresholds to reconstruct (5-39)
+        opponent: Opponent team abbreviation
+
+    Returns:
+        dict: Reconstructed features for PR prediction
+    """
+    player_id = player_row['Player_ID']
+    lineup_id = player_row['LINEUP_ID']
+    team = player_row['TEAM']
+    current_season = 22024  # 2024-25 season
+
+    # Filter player's historical games
+    player_all_games = full_df[full_df['Player_ID'] == player_id].copy()
+
+    if len(player_all_games) == 0:
+        logger.warning(f"  No historical data for player {player_id}")
+        return None
+
+    # Sort by game date
+    player_all_games = player_all_games.sort_values('GAME_DATE_PARSED')
+
+    # Get current season games (before today)
+    player_season_games = player_all_games[player_all_games['SEASON_ID'] == current_season].copy()
+    player_team_games = player_season_games[player_season_games['TEAM'] == team].copy()
+
+    # Get lineup games
+    player_lineup_games = player_team_games[player_team_games['LINEUP_ID'] == lineup_id].copy()
+
+    # Get H2H games (against today's opponent)
+    player_h2h_games = player_team_games[player_team_games['OPPONENT'] == opponent].copy()
+
+    # Base features
+    features = {
+        'Player_ID': player_id,
+        'LINEUP_ID': lineup_id,
+    }
+
+    # Rolling averages
+    features['last_5_avg'] = player_team_games.tail(5)['PR'].mean() if len(player_team_games) >= 5 else player_team_games['PR'].mean()
+    features['last_10_avg'] = player_team_games.tail(10)['PR'].mean() if len(player_team_games) >= 10 else player_team_games['PR'].mean()
+    features['last_20_avg'] = player_team_games.tail(20)['PR'].mean() if len(player_team_games) >= 20 else player_team_games['PR'].mean()
+    features['season_avg'] = player_season_games['PR'].mean() if len(player_season_games) > 0 else 0
+
+    # Last season average
+    last_season_id = current_season - 1
+    player_last_season_games = player_all_games[player_all_games['SEASON_ID'] == last_season_id]
+    features['last_season_avg'] = player_last_season_games['PR'].mean() if len(player_last_season_games) > 0 else 0
+
+    features['lineup_average'] = player_lineup_games['PR'].mean() if len(player_lineup_games) > 0 else 0
+    features['h2h_avg'] = player_h2h_games['PR'].mean() if len(player_h2h_games) > 0 else 0
+
+    # Opponent strength (simplified)
+    features['opp_strength'] = 0.0
+
+    # Threshold-specific percentage features
+    for threshold in thresholds:
+        # Last 5 games
+        last_5_games = player_team_games.tail(5)
+        features[f'last_5_pct_{threshold}'] = (
+            (last_5_games['PR'] >= threshold).mean() if len(last_5_games) > 0 else 0
+        )
+
+        # Last 10 games
+        last_10_games = player_team_games.tail(10)
+        features[f'last_10_pct_{threshold}'] = (
+            (last_10_games['PR'] >= threshold).mean() if len(last_10_games) > 0 else 0
+        )
+
+        # Last 20 games
+        last_20_games = player_team_games.tail(20)
+        features[f'last_20_pct_{threshold}'] = (
+            (last_20_games['PR'] >= threshold).mean() if len(last_20_games) > 0 else 0
+        )
+
+        # Season percentage
+        features[f'season_pct_{threshold}'] = (
+            (player_season_games['PR'] >= threshold).mean() if len(player_season_games) > 0 else 0
+        )
+
+        # Last season percentage - get from latest game if available
+        if len(player_team_games) > 0:
+            latest_game = player_team_games.iloc[-1]
+            features[f'last_season_pct_{threshold}'] = latest_game.get(f'last_season_pct_{threshold}', 0)
+        else:
+            features[f'last_season_pct_{threshold}'] = 0
+
+        # Lineup percentage (with fallback logic)
+        if len(player_lineup_games) > 1:
+            features[f'lineup_pct_{threshold}'] = (
+                (player_lineup_games['PR'] >= threshold).mean()
+            )
+        elif len(player_lineup_games) == 1:
+            # Fallback to first game with different lineup
+            player_team_history = player_team_games.copy()
+            if len(player_team_history) > 0:
+                player_team_sorted = player_team_history.sort_values('GAME_DATE_PARSED')
+                lineup_changed = player_team_sorted['LINEUP_ID'].ne(player_team_sorted['LINEUP_ID'].shift(1))
+                first_lineup_games = player_team_sorted[lineup_changed]
+                if len(first_lineup_games) > 0:
+                    features[f'lineup_pct_{threshold}'] = (
+                        (first_lineup_games['PR'] >= threshold).mean()
+                    )
+                else:
+                    features[f'lineup_pct_{threshold}'] = 0.0
+            else:
+                features[f'lineup_pct_{threshold}'] = 0.0
+        else:
+            features[f'lineup_pct_{threshold}'] = 0.0
+
+        # H2H percentage
+        features[f'h2h_pct_{threshold}'] = (
+            (player_h2h_games['PR'] >= threshold).mean() if len(player_h2h_games) > 0 else 0
+        )
+
+    return features
+
+
+def run_pr_over_gauntlet(reconstructed_features, models):
+    """
+    Run OVER gauntlet for PR starting from lowest threshold.
+
+    Args:
+        reconstructed_features: Dict of reconstructed PR features
+        models: Dict of loaded PR models
+
+    Returns:
+        dict or None: Prediction result if passed threshold
+    """
+    thresholds = sorted(models.keys())
+    highest_passed = None
+    final_probability = 0.0
+
+    for threshold in thresholds:
+        threshold_features = {
+            'Player_ID': reconstructed_features['Player_ID'],
+            'LINEUP_ID': reconstructed_features['LINEUP_ID'],
+            'lineup_average': reconstructed_features['lineup_average'],
+            'last_5_avg': reconstructed_features['last_5_avg'],
+            'last_10_avg': reconstructed_features['last_10_avg'],
+            'last_20_avg': reconstructed_features['last_20_avg'],
+            'season_avg': reconstructed_features['season_avg'],
+            'last_season_avg': reconstructed_features['last_season_avg'],
+            'h2h_avg': reconstructed_features['h2h_avg'],
+            'opp_strength': reconstructed_features['opp_strength'],
+            f'last_5_pct_{threshold}': reconstructed_features[f'last_5_pct_{threshold}'],
+            f'last_10_pct_{threshold}': reconstructed_features[f'last_10_pct_{threshold}'],
+            f'last_20_pct_{threshold}': reconstructed_features[f'last_20_pct_{threshold}'],
+            f'season_pct_{threshold}': reconstructed_features[f'season_pct_{threshold}'],
+            f'last_season_pct_{threshold}': reconstructed_features[f'last_season_pct_{threshold}'],
+            f'lineup_pct_{threshold}': reconstructed_features[f'lineup_pct_{threshold}'],
+            f'h2h_pct_{threshold}': reconstructed_features[f'h2h_pct_{threshold}']
+        }
+
+        try:
+            X = prepare_model_input(threshold_features, models[threshold])
+            prob = models[threshold].predict_proba(X)[0][1]
+
+            if prob >= CONFIDENCE_THRESHOLD:
+                highest_passed = threshold
+                final_probability = prob
+            else:
+                break
+        except Exception as e:
+            logger.warning(f"  Error predicting at PR threshold {threshold}: {e}")
+            break
+
+    if highest_passed is not None:
+        line = highest_passed - 0.5
+        # PR line range: 4.5 to 38.5
+        if line >= 4.5 and line <= 38.5:
+            return {
+                'prop_type': 'OVER',
+                'line': line,
+                'threshold': highest_passed,
+                'confidence': final_probability
+            }
+    return None
+
+
+def run_pr_under_gauntlet(reconstructed_features, models):
+    """
+    Run UNDER gauntlet for PR starting from high threshold.
+
+    Args:
+        reconstructed_features: Dict of reconstructed PR features
+        models: Dict of loaded PR models
+
+    Returns:
+        dict or None: Prediction result if passed threshold
+    """
+    thresholds = sorted(models.keys())
+    season_avg = reconstructed_features.get('season_avg', 0)
+    max_threshold = max(thresholds) if thresholds else 39
+    starting_threshold = min(max_threshold, max(10, int(season_avg) + 5))
+
+    lowest_passed = None
+    under_confidence = 0.0
+
+    for threshold in reversed(thresholds):
+        if threshold > starting_threshold:
+            continue
+
+        threshold_features = {
+            'Player_ID': reconstructed_features['Player_ID'],
+            'LINEUP_ID': reconstructed_features['LINEUP_ID'],
+            'lineup_average': reconstructed_features['lineup_average'],
+            'last_5_avg': reconstructed_features['last_5_avg'],
+            'last_10_avg': reconstructed_features['last_10_avg'],
+            'last_20_avg': reconstructed_features['last_20_avg'],
+            'season_avg': reconstructed_features['season_avg'],
+            'last_season_avg': reconstructed_features['last_season_avg'],
+            'h2h_avg': reconstructed_features['h2h_avg'],
+            'opp_strength': reconstructed_features['opp_strength'],
+            f'last_5_pct_{threshold}': reconstructed_features[f'last_5_pct_{threshold}'],
+            f'last_10_pct_{threshold}': reconstructed_features[f'last_10_pct_{threshold}'],
+            f'last_20_pct_{threshold}': reconstructed_features[f'last_20_pct_{threshold}'],
+            f'season_pct_{threshold}': reconstructed_features[f'season_pct_{threshold}'],
+            f'last_season_pct_{threshold}': reconstructed_features[f'last_season_pct_{threshold}'],
+            f'lineup_pct_{threshold}': reconstructed_features[f'lineup_pct_{threshold}'],
+            f'h2h_pct_{threshold}': reconstructed_features[f'h2h_pct_{threshold}']
+        }
+
+        try:
+            X = prepare_model_input(threshold_features, models[threshold])
+            prob = models[threshold].predict_proba(X)[0][1]
+
+            if prob <= (1 - CONFIDENCE_THRESHOLD):
+                lowest_passed = threshold
+                under_confidence = 1 - prob
+            else:
+                break
+        except Exception as e:
+            logger.warning(f"  Error predicting UNDER at PR threshold {threshold}: {e}")
+            break
+
+    if lowest_passed is not None:
+        line = lowest_passed + 0.5
+        # PR line range: 4.5 to 38.5
+        if line >= 4.5 and line <= 38.5:
+            return {
+                'prop_type': 'UNDER',
+                'line': line,
+                'threshold': lowest_passed,
+                'confidence': under_confidence
+            }
+    return None
+
+
+def run_pr_gauntlet_for_player(player_row, models, team_matchups, full_df):
+    """
+    Run PR gauntlet (OVER and UNDER) for a single player.
+
+    Args:
+        player_row: DataFrame row with player data
+        models: Dictionary of loaded PR models
+        team_matchups: Matchup info from RotoWire
+        full_df: Full PR processed dataset
+
+    Returns:
+        list: List of prediction dicts (can be 0, 1, or 2 predictions)
+    """
+    player_id = player_row['Player_ID']
+    player_name = player_row['PLAYER']
+    team = player_row['TEAM']
+
+    # Get matchup info
+    matchup_info = team_matchups.get(team)
+    if not matchup_info:
+        logger.warning(f"  No matchup info for {player_name} ({team})")
+        return []
+
+    opponent = matchup_info['opponent']
+    is_home = matchup_info['is_home']
+    matchup_str = f"{team} {'vs' if is_home else '@'} {opponent}"
+
+    # Reconstruct features for PR
+    thresholds = sorted(models.keys())
+    reconstructed_features = reconstruct_features_for_pr_prediction(
+        player_row, full_df, thresholds, opponent
+    )
+
+    if reconstructed_features is None:
+        logger.warning(f"  Failed to reconstruct PR features for {player_name}")
+        return []
+
+    # Run both gauntlets
+    over_pred = run_pr_over_gauntlet(reconstructed_features, models)
+    under_pred = run_pr_under_gauntlet(reconstructed_features, models)
+
+    # Build prediction list
+    predictions = []
+
+    if over_pred:
+        predictions.append({
+            'NAME': player_name,
+            'MATCHUP': matchup_str,
+            'GAME_DATE': datetime.today().strftime('%b %d, %Y'),
+            'PROP': f"Over {over_pred['line']} PR",
+            'LINE': over_pred['line'],
+            'CONFIDENCE_SCORE': over_pred['confidence'],
+            'PLAYER_ID': player_id,
+            'OPPONENT': opponent,
+            'THRESHOLD': over_pred['threshold'],
+            'player_row': player_row,
+            'reconstructed_features': reconstructed_features
+        })
+        logger.info(f"  ✓ {player_name}: OVER {over_pred['line']} PR (prob={over_pred['confidence']:.3f})")
+
+    if under_pred:
+        predictions.append({
+            'NAME': player_name,
+            'MATCHUP': matchup_str,
+            'GAME_DATE': datetime.today().strftime('%b %d, %Y'),
+            'PROP': f"Under {under_pred['line']} PR",
+            'LINE': under_pred['line'],
+            'CONFIDENCE_SCORE': under_pred['confidence'],
+            'PLAYER_ID': player_id,
+            'OPPONENT': opponent,
+            'THRESHOLD': under_pred['threshold'],
+            'player_row': player_row,
+            'reconstructed_features': reconstructed_features
+        })
+        logger.info(f"  ✓ {player_name}: UNDER {under_pred['line']} PR (prob={under_pred['confidence']:.3f})")
+
+    # Check separation if both predictions exist
+    if len(predictions) == 2:
+        separation = abs(under_pred['line'] - over_pred['line'])
+        if separation < 4.0:
+            # Keep only higher confidence
+            if over_pred['confidence'] >= under_pred['confidence']:
+                logger.info(f"  ℹ Keeping OVER only (separation={separation:.1f}, higher confidence)")
+                predictions = [predictions[0]]  # Keep OVER
+            else:
+                logger.info(f"  ℹ Keeping UNDER only (separation={separation:.1f}, higher confidence)")
+                predictions = [predictions[1]]  # Keep UNDER
+        else:
+            logger.info(f"  ✓ Keeping BOTH predictions (separation={separation:.1f})")
+
+    if len(predictions) == 0:
+        logger.info(f"  ✗ {player_name}: No PR predictions passed threshold")
+
+    return predictions
 
 
 # ============================================================================
@@ -640,10 +1859,13 @@ def fetch_opponent_rankings_batch(opponents):
         tables = pd.read_html(url_opp)
         opp_stats = tables[5]  # Opponent stats table
 
-        # Team abbreviation to name mapping
+        # Team abbreviation to name mapping (includes alternate abbreviations)
         team_name_map = {
-            'ATL': 'Atlanta Hawks', 'BOS': 'Boston Celtics', 'BRK': 'Brooklyn Nets',
-            'CHI': 'Chicago Bulls', 'CHO': 'Charlotte Hornets', 'CLE': 'Cleveland Cavaliers',
+            'ATL': 'Atlanta Hawks', 'BOS': 'Boston Celtics',
+            'BRK': 'Brooklyn Nets', 'BKN': 'Brooklyn Nets',  # BRK or BKN
+            'CHI': 'Chicago Bulls',
+            'CHO': 'Charlotte Hornets', 'CHA': 'Charlotte Hornets',  # CHO or CHA
+            'CLE': 'Cleveland Cavaliers',
             'DAL': 'Dallas Mavericks', 'DEN': 'Denver Nuggets', 'DET': 'Detroit Pistons',
             'GSW': 'Golden State Warriors', 'HOU': 'Houston Rockets', 'IND': 'Indiana Pacers',
             'LAC': 'Los Angeles Clippers', 'LAL': 'Los Angeles Lakers', 'MEM': 'Memphis Grizzlies',
@@ -748,9 +1970,12 @@ def construct_predictions_dataframe(predictions, opponent_rankings):
             'THIS_SEASON': display_metrics['THIS_SEASON'],
             'LAST_SEASON': display_metrics['LAST_SEASON'],
             'H2H': display_metrics['H2H'],
+            'LINEUP_PCT': display_metrics['LINEUP_PCT'],
+            'OPP_STRENGTH': display_metrics['OPP_STRENGTH'],
             'OPP_PTS_RANK': opp_ranks['OPP_PTS_RANK'],
             'OPP_REB_RANK': opp_ranks['OPP_REB_RANK'],
-            'OPP_AST_RANK': opp_ranks['OPP_AST_RANK']
+            'OPP_AST_RANK': opp_ranks['OPP_AST_RANK'],
+            'STAT_TYPE': pred.get('stat_type', 'PRA')
         })
 
     df = pd.DataFrame(props_list)
@@ -762,8 +1987,14 @@ def construct_predictions_dataframe(predictions, opponent_rankings):
     # Sort by confidence score (highest first)
     df = df.sort_values('CONFIDENCE_SCORE', ascending=False)
 
-    # Filter LINE > 9 (same as daily_props_generator.py)
-    df = df[df['LINE'] > 9]
+    # Filter based on stat type (PRA: LINE > 9, RA: LINE >= 4.5, PA/PR: LINE >= 4.5)
+    if len(df) > 0:
+        df = df[
+            ((df['STAT_TYPE'] == 'PRA') & (df['LINE'] > 9)) |
+            ((df['STAT_TYPE'] == 'RA') & (df['LINE'] >= 4.5)) |
+            ((df['STAT_TYPE'] == 'PA') & (df['LINE'] >= 4.5)) |
+            ((df['STAT_TYPE'] == 'PR') & (df['LINE'] >= 4.5))
+        ]
 
     # Fill NaN with 0
     df = df.fillna(0)
@@ -811,9 +2042,12 @@ def upload_predictions_to_neon(props_df):
             'THIS_SEASON': 'this_season',
             'LAST_SEASON': 'last_season',
             'H2H': 'h2h',
+            'LINEUP_PCT': 'lineup_pct',
+            'OPP_STRENGTH': 'opp_strength',
             'OPP_PTS_RANK': 'opp_pts_rank',
             'OPP_REB_RANK': 'opp_reb_rank',
-            'OPP_AST_RANK': 'opp_ast_rank'
+            'OPP_AST_RANK': 'opp_ast_rank',
+            'STAT_TYPE': 'stat_type'
         })
 
         # Replace NaN with None for SQL
@@ -822,7 +2056,7 @@ def upload_predictions_to_neon(props_df):
         # Define columns in order
         columns = ['name', 'matchup', 'game_date', 'prop', 'line', 'confidence_score',
                    'last_5', 'last_10', 'this_season', 'last_season', 'h2h',
-                   'opp_pts_rank', 'opp_reb_rank', 'opp_ast_rank']
+                   'lineup_pct', 'opp_strength', 'opp_pts_rank', 'opp_reb_rank', 'opp_ast_rank', 'stat_type']
 
         # Prepare values
         values = [tuple(row) for row in df_renamed[columns].values]
@@ -848,12 +2082,219 @@ def upload_predictions_to_neon(props_df):
 
 
 # ============================================================================
-# MAIN PHASE 4 EXECUTION
+# STAT-TYPE SPECIFIC PREDICTION RUNNER
 # ============================================================================
+
+def run_stat_type_predictions(stat_type, s3_handler, teams_playing, team_matchups, league_leaders_df):
+    """
+    Run predictions for a specific stat type (PRA, RA, PA, or PR).
+
+    This function handles:
+    1. Loading stat-specific processed data
+    2. Loading stat-specific models
+    3. Running gauntlet for each player
+    4. Returning predictions with stat_type included
+
+    Args:
+        stat_type: Stat type ('PRA', 'RA', 'PA', 'PR')
+        s3_handler: S3Handler instance
+        teams_playing: Set of teams playing today
+        team_matchups: Dict of team matchup info
+        league_leaders_df: DataFrame of league leaders
+
+    Returns:
+        list: Predictions for this stat type
+    """
+    logger.info("=" * 80)
+    logger.info(f"RUNNING {stat_type} PREDICTIONS")
+    logger.info("=" * 80)
+
+    try:
+        # Get players playing today for this stat type
+        players_today_df, full_df = get_players_playing_today(
+            s3_handler, teams_playing, league_leaders_df, stat_type=stat_type
+        )
+
+        if len(players_today_df) == 0:
+            logger.warning(f"No players with {stat_type} data playing today")
+            return []
+
+        logger.info(f"Players with {stat_type} data playing today: {len(players_today_df)}")
+
+        # Load models for this stat type
+        models = load_all_models(s3_handler, stat_type=stat_type)
+
+        if len(models) == 0:
+            logger.error(f"Failed to load {stat_type} models from S3")
+            return []
+
+        # Run gauntlet for each player
+        logger.info(f"Running {stat_type} gauntlet for each player...")
+        predictions = []
+
+        for idx, player_row in players_today_df.iterrows():
+            if stat_type == 'PRA':
+                # Use PRA gauntlet logic (can return 0, 1, or 2 predictions)
+                pra_preds = run_gauntlet_for_player(player_row, models, team_matchups, full_df)
+                for pred in pra_preds:
+                    pred['stat_type'] = stat_type
+                    predictions.append(pred)
+            elif stat_type == 'RA':
+                # Use RA-specific gauntlet logic (can return 0, 1, or 2 predictions)
+                ra_preds = run_ra_gauntlet_for_player(player_row, models, team_matchups, full_df)
+                for pred in ra_preds:
+                    pred['stat_type'] = stat_type
+                    predictions.append(pred)
+            elif stat_type == 'PA':
+                # Use PA-specific gauntlet logic (can return 0, 1, or 2 predictions)
+                pa_preds = run_pa_gauntlet_for_player(player_row, models, team_matchups, full_df)
+                for pred in pa_preds:
+                    pred['stat_type'] = stat_type
+                    predictions.append(pred)
+            elif stat_type == 'PR':
+                # Use PR-specific gauntlet logic (can return 0, 1, or 2 predictions)
+                pr_preds = run_pr_gauntlet_for_player(player_row, models, team_matchups, full_df)
+                for pred in pr_preds:
+                    pred['stat_type'] = stat_type
+                    predictions.append(pred)
+
+        logger.info(f"{stat_type} predictions generated: {len(predictions)}")
+        return predictions
+
+    except Exception as e:
+        logger.error(f"Error running {stat_type} predictions: {e}")
+        import traceback
+        traceback.print_exc()
+        return []
+
+
+# ============================================================================
+# UNIFIED PHASE 4 - ALL STAT TYPES
+# ============================================================================
+
+def run_phase_4_unified(s3_handler):
+    """
+    Execute Phase 4: Daily Prediction Generation for ALL stat types.
+
+    This is the unified version that runs predictions for:
+    - PRA (Points + Rebounds + Assists)
+    - RA (Rebounds + Assists)
+    - PA (Points + Assists) - when ready
+    - PR (Points + Rebounds) - when ready
+
+    Args:
+        s3_handler: S3Handler instance
+
+    Returns:
+        Tuple of (success, stats dict)
+    """
+    logger.info("=" * 80)
+    logger.info("PHASE 4: UNIFIED DAILY PREDICTION GENERATION (ALL STAT TYPES)")
+    logger.info("=" * 80)
+
+    try:
+        # ========================================================================
+        # SHARED SETUP (ONCE FOR ALL STAT TYPES)
+        # ========================================================================
+
+        # Scrape RotoWire for today's games
+        teams_data = scrape_rotowire_for_teams_playing_today()
+        teams_playing = teams_data['teams_playing']
+        team_matchups = teams_data['team_matchups']
+
+        if len(teams_playing) == 0:
+            logger.warning("No teams playing today - exiting")
+            return False, {
+                'error': 'No teams playing today',
+                'teams_playing': 0,
+                'predictions_by_stat': {}
+            }
+
+        logger.info(f"Teams playing today: {len(teams_playing)}")
+
+        # Fetch league leaders (ONCE)
+        league_leaders_df = fetch_league_leaders()
+        if len(league_leaders_df) == 0:
+            logger.error("Failed to fetch league leaders")
+            return False, {'error': 'Failed to fetch league leaders'}
+
+        logger.info(f"League leaders fetched: {len(league_leaders_df)}")
+
+        # ========================================================================
+        # RUN PREDICTIONS FOR EACH STAT TYPE
+        # ========================================================================
+
+        all_predictions = []
+        predictions_by_stat = {}
+
+        # Define which stat types to run (PRA, RA, PA, PR)
+        stat_types_to_run = ['PRA', 'RA', 'PA', 'PR']
+
+        for stat_type in stat_types_to_run:
+            stat_predictions = run_stat_type_predictions(
+                stat_type, s3_handler, teams_playing, team_matchups, league_leaders_df
+            )
+            all_predictions.extend(stat_predictions)
+            predictions_by_stat[stat_type] = len(stat_predictions)
+
+        logger.info(f"\nTotal predictions across all stat types: {len(all_predictions)}")
+
+        if len(all_predictions) == 0:
+            logger.warning("No predictions passed the gauntlet threshold for any stat type")
+            return True, {
+                'teams_playing': len(teams_playing),
+                'predictions_by_stat': predictions_by_stat,
+                'total_predictions': 0
+            }
+
+        # ========================================================================
+        # FINALIZE AND UPLOAD
+        # ========================================================================
+
+        # Fetch opponent rankings
+        unique_opponents = set(pred['OPPONENT'] for pred in all_predictions)
+        opponent_rankings = fetch_opponent_rankings_batch(unique_opponents)
+
+        # Construct final DataFrame
+        props_df = construct_predictions_dataframe(all_predictions, opponent_rankings)
+
+        # Upload to Neon (includes stat_type column)
+        upload_predictions_to_neon(props_df)
+
+        logger.info("")
+        logger.info("=" * 80)
+        logger.info("✓ PHASE 4 UNIFIED COMPLETE")
+        logger.info("=" * 80)
+        logger.info(f"Teams playing: {len(teams_playing)}")
+        for stat_type, count in predictions_by_stat.items():
+            logger.info(f"{stat_type} predictions: {count}")
+        logger.info(f"Total predictions uploaded: {len(props_df)}")
+        logger.info("=" * 80)
+
+        return True, {
+            'teams_playing': len(teams_playing),
+            'predictions_by_stat': predictions_by_stat,
+            'total_predictions': len(props_df)
+        }
+
+    except Exception as e:
+        logger.error(f"Phase 4 Unified failed with error: {e}")
+        import traceback
+        traceback.print_exc()
+        return False, {'error': str(e)}
+
+
+# ============================================================================
+# MAIN PHASE 4 EXECUTION (LEGACY - PRA ONLY)
+# ============================================================================
+# NOTE: This function is DEPRECATED. Use run_phase_4_unified() instead.
+# Kept for backwards compatibility only.
 
 def run_phase_4(s3_handler):
     """
-    Execute Phase 4: Daily Prediction Generation.
+    Execute Phase 4: Daily Prediction Generation (PRA ONLY - DEPRECATED).
+
+    DEPRECATED: Use run_phase_4_unified() instead for multi-stat support.
 
     Args:
         s3_handler: S3Handler instance
@@ -911,9 +2352,8 @@ def run_phase_4(s3_handler):
         predictions = []
 
         for idx, player_row in players_today_df.iterrows():
-            pred = run_gauntlet_for_player(player_row, models, team_matchups, full_df)
-            if pred is not None:
-                predictions.append(pred)
+            pra_preds = run_gauntlet_for_player(player_row, models, team_matchups, full_df)
+            predictions.extend(pra_preds)
 
         logger.info(f"Predictions generated: {len(predictions)}")
 
@@ -980,8 +2420,8 @@ if __name__ == '__main__':
     # Initialize S3 handler
     s3_handler = S3Handler()
 
-    # Run Phase 4
-    success, stats = run_phase_4(s3_handler)
+    # Run Phase 4 (Unified - supports PRA and RA)
+    success, stats = run_phase_4_unified(s3_handler)
 
     # Exit with appropriate status code
     import sys
