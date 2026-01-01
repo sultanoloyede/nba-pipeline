@@ -107,7 +107,11 @@ def calculate_season_averages_vectorized(df: pd.DataFrame) -> pd.DataFrame:
 
     # Merge to get last season average
     df = df.merge(season_stats, on=['Player_ID', 'SEASON_ID'], how='left')
-    df['last_season_avg'] = df['last_season_avg'].fillna(0.0)
+    if 'last_season_avg' in df.columns:
+        df['last_season_avg'] = df['last_season_avg'].fillna(0.0)
+    else:
+        logger.warning("  last_season_avg column not created by merge, creating with default value 0")
+        df['last_season_avg'] = 0.0
 
     # Sort back to newest first
     df = df.sort_values(['Player_ID', 'GAME_DATE_PARSED'], ascending=[True, False])
@@ -446,9 +450,9 @@ def run_phase_2_pr(s3_handler) -> Tuple[bool, dict]:
         s3_handler.upload_dataframe(
             combined_df,
             S3_PLAYER_BUCKET,
-            'processed_data_pr/processed_model_data_ra.csv'
+            'processed_data_pr/processed_model_data_pr.csv'
         )
-        logger.info("  ✓ Saved to s3://deviation-io-player-bucket/processed_data_pr/processed_model_data_ra.csv")
+        logger.info("  ✓ Saved to s3://deviation-io-player-bucket/processed_data_pr/processed_model_data_pr.csv")
 
         # Generate stats
         stats = {

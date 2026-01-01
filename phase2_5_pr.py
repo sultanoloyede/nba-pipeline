@@ -497,7 +497,7 @@ def run_phase_2_5_pr(s3_handler, threshold_start=5, threshold_end=40, force_repr
         logger.info("Step 1: Downloading processed PR data from Phase 2...")
         df = s3_handler.download_dataframe(
             S3_PLAYER_BUCKET,
-            'processed_data_pr/processed_model_data_ra.csv'
+            'processed_data_pr/processed_model_data_pr.csv'
         )
 
         if df is None:
@@ -597,7 +597,7 @@ def run_phase_2_5_pr(s3_handler, threshold_start=5, threshold_end=40, force_repr
             'thresholds_calculated': f"{threshold_start}-{threshold_end - 1}",
             'num_thresholds': len(thresholds),
             'input_rows': len(df),
-            'input_file': 'processed_data_pr/processed_model_data_ra.csv',
+            'input_file': 'processed_data_pr/processed_model_data_pr.csv',
             'input_file_hash': calculate_file_hash(df),
             'output_file': output_key,
             'columns_added': len(thresholds) * 7,  # 7 percentage types per threshold

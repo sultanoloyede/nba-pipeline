@@ -320,7 +320,7 @@ if __name__ == '__main__':
 
     # Train PR models (thresholds 5-39)
     print("\nTraining PR models (thresholds 5-39)...")
-    success, stats = run_phase_3_pr(s3_handler, threshold_start=5, threshold_end=26)
+    success, stats = run_phase_3_pr(s3_handler, threshold_start=5, threshold_end=39)
 
     if success:
         print("\n✓ Phase 3 PR (Optimized) completed successfully!")
