@@ -101,12 +101,19 @@ def calculate_season_averages_vectorized(df: pd.DataFrame) -> pd.DataFrame:
     # Last season average (join on player + previous season)
     # Note: Group by Player_ID and SEASON_ID only (not TEAM) to handle team changes
     logger.info("  Calculating last season averages...")
+
+    # Calculate season stats using a temporary column name to avoid conflicts
     season_stats = df.groupby(['Player_ID', 'SEASON_ID'])['PA'].mean().reset_index()
-    season_stats.columns = ['Player_ID', 'SEASON_ID', 'last_season_avg']
+    season_stats.columns = ['Player_ID', 'SEASON_ID', 'last_season_avg_temp']
     season_stats['SEASON_ID'] = season_stats['SEASON_ID'] + 1  # Shift to next season
 
-    # Merge to get last season average
+    # Drop last_season_avg if it exists, then merge with temp column
+    if 'last_season_avg' in df.columns:
+        df = df.drop(columns=['last_season_avg'])
+
+    # Merge and rename
     df = df.merge(season_stats, on=['Player_ID', 'SEASON_ID'], how='left')
+    df = df.rename(columns={'last_season_avg_temp': 'last_season_avg'})
     if 'last_season_avg' in df.columns:
         df['last_season_avg'] = df['last_season_avg'].fillna(0.0)
     else:
