@@ -4,11 +4,11 @@ Phase 3 PA: Fast Model Training for PA (OPTIMIZED - Using Pre-calculated Percent
 This is the RA-specific implementation for training models on PA (Points + Assists).
 
 Key Optimizations:
-1. Downloads comprehensive PA file with ALL threshold columns ONCE (not 22 times)
-2. Reuses the DataFrame for all 35 models (thresholds 5-39)
+1. Downloads comprehensive PA file with ALL threshold columns ONCE (not 36 times)
+2. Reuses the DataFrame for all 36 models (thresholds 5-40)
 3. Just filters columns per threshold (no repeated downloads)
 4. Pre-calculated percentages make training ~10x faster
-5. Expected time: 15-20 minutes for all 35 models
+5. Expected time: 15-20 minutes for all 36 models
 
 Author: NBA Props Prediction System
 Date: 2025-12-31
@@ -136,13 +136,13 @@ def train_model_for_threshold(df_all: pd.DataFrame, threshold: int) -> Tuple[xgb
     return model, precision, metrics
 
 
-def run_phase_3_pa(s3_handler, threshold_start: int = 5, threshold_end: int = 39) -> Tuple[bool, Dict]:
+def run_phase_3_pa(s3_handler, threshold_start: int = 5, threshold_end: int = 40) -> Tuple[bool, Dict]:
     """
     Execute Phase 3 PA (OPTIMIZED): Model Training for PA using pre-calculated percentages.
 
     This is the RA-specific implementation that:
     1. Downloads comprehensive PA file ONCE
-    2. Reuses DataFrame for all 35 models (thresholds 5-39)
+    2. Reuses DataFrame for all 36 models (thresholds 5-40)
     3. Trains models sequentially (one threshold at a time)
     4. Saves each model to S3 immediately in separate PA folder
 
@@ -151,8 +151,8 @@ def run_phase_3_pa(s3_handler, threshold_start: int = 5, threshold_end: int = 39
 
     Args:
         s3_handler: S3Handler instance
-        threshold_start: Starting threshold (default: 5 for RA)
-        threshold_end: Ending threshold (default: 26 for RA, so thresholds 5-39 inclusive)
+        threshold_start: Starting threshold (default: 5 for PA)
+        threshold_end: Ending threshold (default: 40 for PA, so thresholds 5-40 inclusive)
 
     Returns:
         Tuple of (success: bool, stats: dict)
@@ -318,9 +318,9 @@ if __name__ == '__main__':
 
     s3_handler = S3Handler()
 
-    # Train PA models (thresholds 5-39)
-    print("\nTraining PA models (thresholds 5-39)...")
-    success, stats = run_phase_3_pa(s3_handler, threshold_start=5, threshold_end=39)
+    # Train PA models (thresholds 5-40)
+    print("\nTraining PA models (thresholds 5-40)...")
+    success, stats = run_phase_3_pa(s3_handler, threshold_start=5, threshold_end=40)
 
     if success:
         print("\n✓ Phase 3 PA (Optimized) completed successfully!")

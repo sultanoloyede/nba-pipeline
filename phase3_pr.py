@@ -4,11 +4,11 @@ Phase 3 PR: Fast Model Training for PR (OPTIMIZED - Using Pre-calculated Percent
 This is the RA-specific implementation for training models on PR (Points + Rebounds).
 
 Key Optimizations:
-1. Downloads comprehensive PR file with ALL threshold columns ONCE (not 22 times)
-2. Reuses the DataFrame for all 35 models (thresholds 5-39)
+1. Downloads comprehensive PR file with ALL threshold columns ONCE (not 36 times)
+2. Reuses the DataFrame for all 36 models (thresholds 5-40)
 3. Just filters columns per threshold (no repeated downloads)
 4. Pre-calculated percentages make training ~10x faster
-5. Expected time: 15-20 minutes for all 35 models
+5. Expected time: 15-20 minutes for all 36 models
 
 Author: NBA Props Prediction System
 Date: 2025-12-31
@@ -136,13 +136,13 @@ def train_model_for_threshold(df_all: pd.DataFrame, threshold: int) -> Tuple[xgb
     return model, precision, metrics
 
 
-def run_phase_3_pr(s3_handler, threshold_start: int = 5, threshold_end: int = 39) -> Tuple[bool, Dict]:
+def run_phase_3_pr(s3_handler, threshold_start: int = 5, threshold_end: int = 40) -> Tuple[bool, Dict]:
     """
     Execute Phase 3 PR (OPTIMIZED): Model Training for PR using pre-calculated percentages.
 
     This is the RA-specific implementation that:
     1. Downloads comprehensive PR file ONCE
-    2. Reuses DataFrame for all 35 models (thresholds 5-39)
+    2. Reuses DataFrame for all 36 models (thresholds 5-40)
     3. Trains models sequentially (one threshold at a time)
     4. Saves each model to S3 immediately in separate PR folder
 
@@ -151,8 +151,8 @@ def run_phase_3_pr(s3_handler, threshold_start: int = 5, threshold_end: int = 39
 
     Args:
         s3_handler: S3Handler instance
-        threshold_start: Starting threshold (default: 5 for RA)
-        threshold_end: Ending threshold (default: 26 for RA, so thresholds 5-39 inclusive)
+        threshold_start: Starting threshold (default: 5 for PR)
+        threshold_end: Ending threshold (default: 40 for PR, so thresholds 5-40 inclusive)
 
     Returns:
         Tuple of (success: bool, stats: dict)
@@ -318,9 +318,9 @@ if __name__ == '__main__':
 
     s3_handler = S3Handler()
 
-    # Train PR models (thresholds 5-39)
-    print("\nTraining PR models (thresholds 5-39)...")
-    success, stats = run_phase_3_pr(s3_handler, threshold_start=5, threshold_end=39)
+    # Train PR models (thresholds 5-40)
+    print("\nTraining PR models (thresholds 5-40)...")
+    success, stats = run_phase_3_pr(s3_handler, threshold_start=5, threshold_end=40)
 
     if success:
         print("\n✓ Phase 3 PR (Optimized) completed successfully!")
