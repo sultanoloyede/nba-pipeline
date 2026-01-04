@@ -212,8 +212,8 @@ def get_players_playing_today(s3_handler, teams_playing, league_leaders_df, stat
     data_paths = {
         'PRA': 'processed_data/processed_with_all_pct_10-51.csv',
         'RA': 'processed_data_ra/processed_with_ra_pct_5-26.csv',
-        'PA': 'processed_data_pa/processed_with_pa_pct_5-39.csv',
-        'PR': 'processed_data_pr/processed_with_pr_pct_5-39.csv',
+        'PA': 'processed_data_pa/processed_with_pa_pct_5-40.csv',
+        'PR': 'processed_data_pr/processed_with_pr_pct_5-40.csv',
     }
 
     data_path = data_paths.get(stat_type.upper())
@@ -789,7 +789,7 @@ def reconstruct_features_for_ra_prediction(player_row, full_df, thresholds, oppo
     player_id = player_row['Player_ID']
     lineup_id = player_row['LINEUP_ID']
     team = player_row['TEAM']
-    current_season = 22024  # 2024-25 season
+    current_season = 22025  # 2024-25 season
 
     # Filter player's historical games
     player_all_games = full_df[full_df['Player_ID'] == player_id].copy()
@@ -1144,7 +1144,7 @@ def reconstruct_features_for_pa_prediction(player_row, full_df, thresholds, oppo
     player_id = player_row['Player_ID']
     lineup_id = player_row['LINEUP_ID']
     team = player_row['TEAM']
-    current_season = 22024  # 2024-25 season
+    current_season = 22025  # 2024-25 season
 
     # Filter player's historical games
     player_all_games = full_df[full_df['Player_ID'] == player_id].copy()
@@ -1327,6 +1327,9 @@ def run_pa_under_gauntlet(reconstructed_features, models):
     """
     thresholds = sorted(models.keys())
     season_avg = reconstructed_features.get('season_avg', 0)
+    # Handle NaN values
+    if pd.isna(season_avg):
+        season_avg = 0
     max_threshold = max(thresholds) if thresholds else 39
     starting_threshold = min(max_threshold, max(10, int(season_avg) + 5))
 
@@ -1499,7 +1502,7 @@ def reconstruct_features_for_pr_prediction(player_row, full_df, thresholds, oppo
     player_id = player_row['Player_ID']
     lineup_id = player_row['LINEUP_ID']
     team = player_row['TEAM']
-    current_season = 22024  # 2024-25 season
+    current_season = 22025  # 2024-25 season
 
     # Filter player's historical games
     player_all_games = full_df[full_df['Player_ID'] == player_id].copy()
@@ -1682,6 +1685,9 @@ def run_pr_under_gauntlet(reconstructed_features, models):
     """
     thresholds = sorted(models.keys())
     season_avg = reconstructed_features.get('season_avg', 0)
+    # Handle NaN values
+    if pd.isna(season_avg):
+        season_avg = 0
     max_threshold = max(thresholds) if thresholds else 39
     starting_threshold = min(max_threshold, max(10, int(season_avg) + 5))
 

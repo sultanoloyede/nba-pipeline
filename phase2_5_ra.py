@@ -516,24 +516,6 @@ def run_phase_2_5_ra(s3_handler, threshold_start=5, threshold_end=27, force_repr
             logger.error("RA column not found in processed data")
             return False, {'error': 'RA column missing'}
 
-        # Check metadata to see if processing is needed
-        metadata_key = 'metadata/ra_pct_metadata.json'
-        if not force_reprocess:
-            needs_processing, existing_metadata = check_if_processing_needed(
-                s3_handler, S3_PLAYER_BUCKET, metadata_key, df, threshold_start, threshold_end - 1
-            )
-
-            if not needs_processing:
-                logger.info("\n" + "=" * 80)
-                logger.info("PHASE 2.5 RA SKIPPED - Already up to date")
-                logger.info("=" * 80)
-                logger.info("Use force_reprocess=True to force re-calculation")
-                return True, {
-                    'skipped': True,
-                    'reason': 'Metadata indicates processing not needed',
-                    'existing_metadata': existing_metadata
-                }
-
         # Step 2: Calculate percentage columns for all thresholds (VECTORIZED)
         thresholds = list(range(threshold_start, threshold_end))
         logger.info(f"\nStep 2: Calculating percentage columns for {len(thresholds)} thresholds (VECTORIZED)...")
@@ -585,27 +567,6 @@ def run_phase_2_5_ra(s3_handler, threshold_start=5, threshold_end=27, force_repr
         s3_handler.upload_dataframe(df, S3_PLAYER_BUCKET, output_key)
         logger.info(f"✓ Saved to s3://{S3_PLAYER_BUCKET}/{output_key}")
         logger.info(f"  File size: {file_size_mb:.1f} MB")
-
-        # Step 4: Save metadata
-        logger.info("\n[7/7] Saving metadata...")
-        end_time = datetime.now()
-        processing_time = (end_time - start_time).total_seconds()
-
-        metadata = {
-            'stat_type': 'RA',
-            'last_run': end_time.isoformat(),
-            'thresholds_calculated': f"{threshold_start}-{threshold_end - 1}",
-            'num_thresholds': len(thresholds),
-            'input_rows': len(df),
-            'input_file': 'processed_data_ra/processed_model_data_ra.csv',
-            'input_file_hash': calculate_file_hash(df),
-            'output_file': output_key,
-            'columns_added': len(thresholds) * 7,  # 7 percentage types per threshold
-            'file_size_mb': round(file_size_mb, 2),
-            'calculation_time_seconds': round(processing_time, 2)
-        }
-
-        save_metadata(s3_handler, S3_PLAYER_BUCKET, metadata_key, metadata)
 
         # Generate stats
         stats = {
