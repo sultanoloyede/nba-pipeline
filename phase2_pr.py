@@ -413,10 +413,10 @@ def run_phase_2_pr(s3_handler) -> Tuple[bool, dict]:
         # Step 3: Add core columns (VECTORIZED)
         logger.info("\nStep 3: Adding core columns (vectorized)...")
 
-        # PR (vectorized) - Rebounds + Assists
-        if 'PR' not in combined_df.columns:
-            combined_df['PR'] = combined_df['PTS'] + combined_df['REB']
-            logger.info("  ✓ Added PR column (PTS + REB)")
+        # PR (vectorized) - Points + Rebounds
+        # Always recalculate PR from PTS + REB (don't trust existing PR column if present)
+        combined_df['PR'] = combined_df['PTS'] + combined_df['REB']
+        logger.info("  ✓ Calculated PR column (PTS + REB)")
 
         # Parse dates (vectorized)
         combined_df['GAME_DATE_PARSED'] = pd.to_datetime(combined_df['GAME_DATE'], format='%b %d, %Y')

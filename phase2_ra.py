@@ -410,9 +410,9 @@ def run_phase_2_ra(s3_handler) -> Tuple[bool, dict]:
         logger.info("\nStep 3: Adding core columns (vectorized)...")
 
         # RA (vectorized) - Rebounds + Assists
-        if 'RA' not in combined_df.columns:
-            combined_df['RA'] = combined_df['REB'] + combined_df['AST']
-            logger.info("  ✓ Added RA column (REB + AST)")
+        # Always recalculate RA from REB + AST (don't trust existing RA column if present)
+        combined_df['RA'] = combined_df['REB'] + combined_df['AST']
+        logger.info("  ✓ Calculated RA column (REB + AST)")
 
         # Parse dates (vectorized)
         combined_df['GAME_DATE_PARSED'] = pd.to_datetime(combined_df['GAME_DATE'], format='%b %d, %Y')

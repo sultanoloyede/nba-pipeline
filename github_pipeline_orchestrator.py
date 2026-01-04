@@ -302,13 +302,6 @@ class PipelineOrchestrator:
         pipeline_start = datetime.now()
         failed_phases = []
 
-        # Special handling: If phase 3 is requested, ensure phase 2.5 runs first
-        if '3' in phases_to_run and '2.5' not in phases_to_run:
-            logger.info("Phase 3 requires Phase 2.5. Adding Phase 2.5 to pipeline.")
-            # Insert 2.5 before 3
-            idx = phases_to_run.index('3')
-            phases_to_run.insert(idx, '2.5')
-
         # Run each phase sequentially
         for phase_num in phases_to_run:
             success = self.run_phase(phase_num)

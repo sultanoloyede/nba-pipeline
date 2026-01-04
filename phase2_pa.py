@@ -413,10 +413,10 @@ def run_phase_2_pa(s3_handler) -> Tuple[bool, dict]:
         # Step 3: Add core columns (VECTORIZED)
         logger.info("\nStep 3: Adding core columns (vectorized)...")
 
-        # PA (vectorized) - Rebounds + Assists
-        if 'PA' not in combined_df.columns:
-            combined_df['PA'] = combined_df['PTS'] + combined_df['AST']
-            logger.info("  ✓ Added PA column (PTS + AST)")
+        # PA (vectorized) - Points + Assists
+        # Always recalculate PA from PTS + AST (don't trust existing PA column if present)
+        combined_df['PA'] = combined_df['PTS'] + combined_df['AST']
+        logger.info("  ✓ Calculated PA column (PTS + AST)")
 
         # Parse dates (vectorized)
         combined_df['GAME_DATE_PARSED'] = pd.to_datetime(combined_df['GAME_DATE'], format='%b %d, %Y')
