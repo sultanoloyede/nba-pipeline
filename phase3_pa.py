@@ -4,11 +4,11 @@ Phase 3 PA: Fast Model Training for PA (OPTIMIZED - Using Pre-calculated Percent
 This is the RA-specific implementation for training models on PA (Points + Assists).
 
 Key Optimizations:
-1. Downloads comprehensive PA file with ALL threshold columns ONCE (not 36 times)
-2. Reuses the DataFrame for all 36 models (thresholds 5-40)
+1. Downloads comprehensive PA file with ALL threshold columns ONCE (not 34 times)
+2. Reuses the DataFrame for all 34 models (thresholds 8-41)
 3. Just filters columns per threshold (no repeated downloads)
 4. Pre-calculated percentages make training ~10x faster
-5. Expected time: 15-20 minutes for all 36 models
+5. Expected time: 15-20 minutes for all 34 models
 
 Author: NBA Props Prediction System
 Date: 2025-12-31
@@ -136,13 +136,13 @@ def train_model_for_threshold(df_all: pd.DataFrame, threshold: int) -> Tuple[xgb
     return model, precision, metrics
 
 
-def run_phase_3_pa(s3_handler, threshold_start: int = 5, threshold_end: int = 40) -> Tuple[bool, Dict]:
+def run_phase_3_pa(s3_handler, threshold_start: int = 8, threshold_end: int = 41) -> Tuple[bool, Dict]:
     """
     Execute Phase 3 PA (OPTIMIZED): Model Training for PA using pre-calculated percentages.
 
     This is the RA-specific implementation that:
     1. Downloads comprehensive PA file ONCE
-    2. Reuses DataFrame for all 36 models (thresholds 5-40)
+    2. Reuses DataFrame for all 34 models (thresholds 8-41)
     3. Trains models sequentially (one threshold at a time)
     4. Saves each model to S3 immediately in separate PA folder
 
@@ -151,8 +151,8 @@ def run_phase_3_pa(s3_handler, threshold_start: int = 5, threshold_end: int = 40
 
     Args:
         s3_handler: S3Handler instance
-        threshold_start: Starting threshold (default: 5 for PA)
-        threshold_end: Ending threshold (default: 40 for PA, so thresholds 5-40 inclusive)
+        threshold_start: Starting threshold (default: 8 for PA, representing o/u 7.5)
+        threshold_end: Ending threshold (default: 41 for PA, so thresholds 8-40 inclusive representing o/u 7.5-40.5)
 
     Returns:
         Tuple of (success: bool, stats: dict)
@@ -173,7 +173,7 @@ def run_phase_3_pa(s3_handler, threshold_start: int = 5, threshold_end: int = 40
         # ============================================================================
         logger.info("\nSTEP 1: Loading comprehensive PA data with all percentage columns...")
 
-        data_key = f'processed_data_pa/processed_with_pa_pct_{threshold_start}-{threshold_end}.csv'
+        data_key = f'processed_data_pa/processed_with_pa_pct_{threshold_start}-{threshold_end - 1}.csv'
         logger.info(f"  Downloading: s3://{S3_PLAYER_BUCKET}/{data_key}")
 
         df_all = s3_handler.download_dataframe(S3_PLAYER_BUCKET, data_key)
@@ -318,9 +318,9 @@ if __name__ == '__main__':
 
     s3_handler = S3Handler()
 
-    # Train PA models (thresholds 5-40)
-    print("\nTraining PA models (thresholds 5-40)...")
-    success, stats = run_phase_3_pa(s3_handler, threshold_start=5, threshold_end=40)
+    # Train PA models (thresholds 8-41, representing o/u 7.5-40.5)
+    print("\nTraining PA models (thresholds 8-41)...")
+    success, stats = run_phase_3_pa(s3_handler, threshold_start=8, threshold_end=41)
 
     if success:
         print("\n✓ Phase 3 PA (Optimized) completed successfully!")

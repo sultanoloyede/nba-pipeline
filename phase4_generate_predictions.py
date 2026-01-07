@@ -290,8 +290,8 @@ def load_all_models(s3_handler, stat_type='PRA', threshold_start=None, threshold
     stat_configs = {
         'PRA': {'start': 10, 'end': 52, 'folder': 'models', 'prefix': 'xgb_pra'},
         'RA': {'start': 5, 'end': 27, 'folder': 'models_ra', 'prefix': 'xgb_ra'},
-        'PA': {'start': 5, 'end': 40, 'folder': 'models_pa', 'prefix': 'xgb_pa'},
-        'PR': {'start': 5, 'end': 40, 'folder': 'models_pr', 'prefix': 'xgb_pr'},
+        'PA': {'start': 8, 'end': 41, 'folder': 'models_pa', 'prefix': 'xgb_pa'},
+        'PR': {'start': 8, 'end': 41, 'folder': 'models_pr', 'prefix': 'xgb_pr'},
     }
 
     config = stat_configs.get(stat_type.upper())
