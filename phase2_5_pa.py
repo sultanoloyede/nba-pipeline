@@ -1,7 +1,7 @@
 """
 Phase 2.5 PA: Pre-calculate ALL Percentage Columns for PA (OPTIMIZED + METADATA)
 
-This phase runs to pre-calculate percentage columns for PA thresholds (5-40)
+This phase runs to pre-calculate percentage columns for PA thresholds (8-40)
 and saves them to S3. This dramatically speeds up Phase 3.
 
 NEW: Metadata System
@@ -461,7 +461,7 @@ def calculate_h2h_percentage_all_thresholds_vectorized(df: pd.DataFrame, thresho
     return threshold_results
 
 
-def run_phase_2_5_pa(s3_handler, threshold_start=5, threshold_end=41, force_reprocess=False) -> Tuple[bool, dict]:
+def run_phase_2_5_pa(s3_handler, threshold_start=8, threshold_end=41, force_reprocess=False) -> Tuple[bool, dict]:
     """
     Execute Phase 2.5 PA: Pre-calculate ALL percentage columns for PA thresholds.
 
@@ -477,8 +477,8 @@ def run_phase_2_5_pa(s3_handler, threshold_start=5, threshold_end=41, force_repr
 
     Args:
         s3_handler: S3Handler instance
-        threshold_start: Starting threshold (default: 5 for PA)
-        threshold_end: Ending threshold + 1 (default: 41, so thresholds 5-40)
+        threshold_start: Starting threshold (default: 8 for PA)
+        threshold_end: Ending threshold + 1 (default: 41, so thresholds 8-40)
         force_reprocess: Force reprocessing even if metadata says it's not needed
 
     Returns:
