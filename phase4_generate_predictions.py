@@ -2215,6 +2215,58 @@ def should_exclude_player(return_date_str, today):
     return False
 
 
+def names_match(name1, name2):
+    """
+    Check if two player names match, handling variations like "Zach Edey" vs "Z. Edey".
+
+    Args:
+        name1: First name to compare
+        name2: Second name to compare
+
+    Returns:
+        bool: True if names likely refer to same player
+    """
+    # Normalize both names
+    def normalize(name):
+        # Remove dots and extra spaces
+        name = name.replace('.', '').strip()
+        # Convert to lowercase
+        name = name.lower()
+        return name
+
+    norm1 = normalize(name1)
+    norm2 = normalize(name2)
+
+    # Exact match after normalization
+    if norm1 == norm2:
+        return True
+
+    # Split into parts
+    parts1 = norm1.split()
+    parts2 = norm2.split()
+
+    # Must have at least last name
+    if len(parts1) == 0 or len(parts2) == 0:
+        return False
+
+    # Last names must match
+    if parts1[-1] != parts2[-1]:
+        return False
+
+    # If one has initial and one has full first name
+    # e.g., "Z Edey" vs "Zach Edey"
+    if len(parts1) >= 1 and len(parts2) >= 1:
+        first1 = parts1[0] if len(parts1) > 1 else ""
+        first2 = parts2[0] if len(parts2) > 1 else ""
+
+        # One is initial of the other
+        if first1 and first2:
+            if first1[0] == first2[0]:
+                return True
+
+    return False
+
+
 def filter_injured_players(props_df, today):
     """
     Filter out players who are injured and not returning today.
@@ -2235,26 +2287,42 @@ def filter_injured_players(props_df, today):
         logger.info("No injury data available, skipping injury filtering")
         return props_df
 
-    # Filter out injured players
-    excluded_players = []
-
+    # Build list of excluded player names from ESPN
+    excluded_espn_names = []
     for player_name, return_date_str in injured_players.items():
         if should_exclude_player(return_date_str, today):
-            excluded_players.append(player_name)
+            excluded_espn_names.append(player_name)
 
-    if excluded_players:
-        logger.info(f"Excluding {len(excluded_players)} injured players:")
-        for player in excluded_players:
-            return_date = injured_players.get(player, 'Unknown')
-            logger.info(f"  - {player} (return: {return_date})")
-
-        # Filter DataFrame - remove rows where NAME matches any excluded player
-        props_df = props_df[~props_df['NAME'].isin(excluded_players)].copy()
-
-        filtered_count = initial_count - len(props_df)
-        logger.info(f"Removed {filtered_count} predictions for injured players")
-    else:
+    if not excluded_espn_names:
         logger.info("No players need to be excluded based on injury status")
+        return props_df
+
+    logger.info(f"Checking {len(excluded_espn_names)} injured players from ESPN:")
+    for player in excluded_espn_names:
+        return_date = injured_players.get(player, 'Unknown')
+        logger.info(f"  - {player} (return: {return_date})")
+
+    # Match props table names with injured player names using fuzzy matching
+    rows_to_remove = []
+    matched_players = []
+
+    for idx, row in props_df.iterrows():
+        props_name = row['NAME']
+        for espn_name in excluded_espn_names:
+            if names_match(props_name, espn_name):
+                rows_to_remove.append(idx)
+                matched_players.append(f"{props_name} (ESPN: {espn_name})")
+                break
+
+    if rows_to_remove:
+        logger.info(f"Matched and removing {len(rows_to_remove)} players:")
+        for player in matched_players:
+            logger.info(f"  - {player}")
+
+        props_df = props_df.drop(rows_to_remove).copy()
+        logger.info(f"Removed {len(rows_to_remove)} predictions for injured players")
+    else:
+        logger.info("No matching players found in predictions to exclude")
 
     return props_df
 
