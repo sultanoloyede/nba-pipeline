@@ -2117,6 +2117,149 @@ def construct_predictions_dataframe(predictions, opponent_rankings):
 
 
 # ============================================================================
+# 4.8: INJURY STATUS FILTERING
+# ============================================================================
+
+def get_injured_players():
+    """
+    Scrape ESPN injuries page to get list of injured players and their return dates.
+
+    Returns:
+        dict: Dictionary mapping player names to return date strings
+              Example: {'Josh Minott': 'Jan 10', 'CJ McCollum': 'Jan 9'}
+    """
+    try:
+        logger.info("Fetching injury data from ESPN...")
+        url = 'https://www.espn.com/nba/injuries'
+        response = requests.get(url, timeout=10)
+        response.raise_for_status()
+
+        soup = BeautifulSoup(response.content, 'html.parser')
+        injured_players = {}
+
+        # Find all injury tables (one per team)
+        tables = soup.find_all('table', class_='Table')
+
+        for table in tables:
+            tbody = table.find('tbody')
+            if not tbody:
+                continue
+
+            rows = tbody.find_all('tr')
+            for row in rows:
+                cells = row.find_all('td')
+                if len(cells) >= 4:
+                    # ESPN table columns: Name, Position, Status, Comment, Date
+                    name_cell = cells[0]
+                    date_cell = cells[-1]  # Last column is usually the date
+
+                    # Extract player name
+                    player_name = name_cell.get_text(strip=True)
+                    # Extract return date
+                    return_date = date_cell.get_text(strip=True)
+
+                    if player_name and return_date:
+                        injured_players[player_name] = return_date
+
+        logger.info(f"  Found {len(injured_players)} injured players")
+        return injured_players
+
+    except Exception as e:
+        logger.warning(f"  Failed to fetch injury data from ESPN: {e}")
+        logger.warning("  Continuing without injury filtering")
+        return {}
+
+
+def should_exclude_player(return_date_str, today):
+    """
+    Determine if a player should be excluded based on their return date.
+
+    Args:
+        return_date_str: Return date string from ESPN (e.g., "Jan 10", "Expected to be out until...")
+        today: Today's date as datetime.date object
+
+    Returns:
+        bool: True if player should be excluded (return date is in future), False otherwise
+    """
+    if not return_date_str or return_date_str.strip() == '':
+        # No return date means player is active or day-to-day
+        return False
+
+    # If it's a long description, it's likely a future return
+    if len(return_date_str) > 15 or 'expected' in return_date_str.lower() or 'out' in return_date_str.lower():
+        return True
+
+    try:
+        # Try to parse date like "Jan 10"
+        # Assume current year
+        current_year = today.year
+        date_parts = return_date_str.split()
+
+        if len(date_parts) >= 2:
+            month_str = date_parts[0]
+            day_str = date_parts[1].replace(',', '')
+
+            # Parse month and day
+            from datetime import datetime
+            date_str = f"{month_str} {day_str} {current_year}"
+            return_date = datetime.strptime(date_str, "%b %d %Y").date()
+
+            # If return date is in the future (after today), exclude player
+            if return_date > today:
+                return True
+
+    except Exception:
+        # If we can't parse, assume it's a description and exclude
+        return True
+
+    return False
+
+
+def filter_injured_players(props_df, today):
+    """
+    Filter out players who are injured and not returning today.
+
+    Args:
+        props_df: DataFrame with predictions
+        today: Today's date as datetime.date object
+
+    Returns:
+        DataFrame: Filtered predictions with injured players removed
+    """
+    initial_count = len(props_df)
+
+    # Get injured players
+    injured_players = get_injured_players()
+
+    if not injured_players:
+        logger.info("No injury data available, skipping injury filtering")
+        return props_df
+
+    # Filter out injured players
+    excluded_players = []
+
+    for player_name, return_date_str in injured_players.items():
+        if should_exclude_player(return_date_str, today):
+            excluded_players.append(player_name)
+
+    if excluded_players:
+        logger.info(f"Excluding {len(excluded_players)} injured players:")
+        for player in excluded_players:
+            return_date = injured_players.get(player, 'Unknown')
+            logger.info(f"  - {player} (return: {return_date})")
+
+        # Filter DataFrame - remove rows where NAME matches any excluded player
+        props_df = props_df[~props_df['NAME'].isin(excluded_players)].copy()
+
+        filtered_count = initial_count - len(props_df)
+        logger.info(f"Removed {filtered_count} predictions for injured players")
+    else:
+        logger.info("No players need to be excluded based on injury status")
+
+    return props_df
+
+
+# ============================================================================
 # 4.9: UPLOAD TO NEON DATABASE
 # ============================================================================
 
@@ -2310,6 +2453,9 @@ def run_phase_4_unified(s3_handler):
         # SHARED SETUP (ONCE FOR ALL STAT TYPES)
         # ========================================================================
 
+        # Get today's date
+        today = date.today()
+
         # Scrape RotoWire for today's games
         teams_data = scrape_rotowire_for_teams_playing_today()
         teams_playing = teams_data['teams_playing']
@@ -2371,6 +2517,9 @@ def run_phase_4_unified(s3_handler):
         # Construct final DataFrame
         props_df = construct_predictions_dataframe(all_predictions, opponent_rankings)
 
+        # Filter out injured players
+        props_df = filter_injured_players(props_df, today)
+
         # Upload to Neon (includes stat_type column)
         upload_predictions_to_neon(props_df)
 
@@ -2420,6 +2569,9 @@ def run_phase_4(s3_handler):
     logger.info("=" * 80)
 
     try:
+        # Get today's date
+        today = date.today()
+
         # 4.1: Scrape RotoWire
         teams_data = scrape_rotowire_for_teams_playing_today()
         teams_playing = teams_data['teams_playing']
@@ -2485,6 +2637,9 @@ def run_phase_4(s3_handler):
 
         # 4.8: Construct final DataFrame
         props_df = construct_predictions_dataframe(predictions, opponent_rankings)
+
+        # Filter out injured players
+        props_df = filter_injured_players(props_df, today)
 
         # 4.9: Upload to Neon
         upload_predictions_to_neon(props_df)
