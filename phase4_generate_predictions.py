@@ -347,6 +347,85 @@ def load_all_models(s3_handler, stat_type='PRA', threshold_start=None, threshold
 # 4.4: RECONSTRUCT FEATURES FOR PREDICTION
 # ============================================================================
 
+def get_opponent_strength(full_df, opponent_team, current_season):
+    """
+    Get the most recent opponent strength for a given opponent team.
+
+    Args:
+        full_df: Full processed dataset
+        opponent_team: Opponent team abbreviation
+        current_season: Current season ID
+
+    Returns:
+        float: Most recent opponent strength value for this opponent, or 0.0 if not found
+    """
+    # Filter for games against this opponent in the current season
+    opp_games = full_df[
+        (full_df['OPPONENT'] == opponent_team) &
+        (full_df['SEASON_ID'] == current_season)
+    ].copy()
+
+    if len(opp_games) == 0:
+        # Try previous season if no current season data
+        opp_games = full_df[
+            (full_df['OPPONENT'] == opponent_team) &
+            (full_df['SEASON_ID'] == current_season - 1)
+        ].copy()
+
+    if len(opp_games) == 0:
+        return 0.0
+
+    # Sort by date and get the most recent game's opponent strength
+    opp_games = opp_games.sort_values('GAME_DATE_PARSED', ascending=False)
+    most_recent_opp_strength = opp_games.iloc[0].get('opp_strength', 0.0)
+
+    # Handle NaN values
+    if pd.isna(most_recent_opp_strength):
+        return 0.0
+
+    return most_recent_opp_strength
+
+
+def normalize_team_abbreviation(team_abbr, full_df, player_name=""):
+    """
+    Normalize team abbreviation and validate it exists in data.
+    Handles alternate abbreviations (BRK/BKN, CHO/CHA).
+
+    Args:
+        team_abbr: Original team abbreviation
+        full_df: Full processed dataset
+        player_name: Player name for logging context (optional)
+
+    Returns:
+        str: Normalized team abbreviation that exists in data
+    """
+    # Map of alternate abbreviations
+    alternate_abbrs = {
+        'BRK': 'BKN',
+        'BKN': 'BRK',
+        'CHO': 'CHA',
+        'CHA': 'CHO'
+    }
+
+    # Check if abbreviation exists in data
+    available_teams = full_df['OPPONENT'].unique()
+
+    if team_abbr in available_teams:
+        return team_abbr
+
+    # Try alternate abbreviation
+    alt_abbr = alternate_abbrs.get(team_abbr)
+    if alt_abbr and alt_abbr in available_teams:
+        logger.info(f"H2H: Using alternate abbreviation {alt_abbr} for {team_abbr}" +
+                   (f" (player: {player_name})" if player_name else ""))
+        return alt_abbr
+
+    # If neither found, log warning and return original
+    logger.warning(f"H2H: Team abbreviation '{team_abbr}' not found in data" +
+                  (f" (player: {player_name})" if player_name else ""))
+    return team_abbr
+
+
 def reconstruct_features_for_prediction(player_row, full_df, thresholds, today_opponent):
     """
     Reconstruct features by INCLUDING the current game's PRA for future prediction.
@@ -386,12 +465,15 @@ def reconstruct_features_for_prediction(player_row, full_df, thresholds, today_o
     # Get lineup games
     player_lineup_games = player_team_games[player_team_games['LINEUP_ID'] == lineup_id]
 
-    # Get H2H games (last 3 seasons)
+    # Get H2H games (last 3 seasons) - normalize opponent abbreviation first
     target_seasons = [current_season, current_season - 1, current_season - 2]
+    normalized_opponent = normalize_team_abbreviation(opponent, full_df, player_row.get('PLAYER', ''))
     player_h2h_games = player_all_games[
-        (player_all_games['OPPONENT'] == opponent) &
+        (player_all_games['OPPONENT'] == normalized_opponent) &
         (player_all_games['SEASON_ID'].isin(target_seasons))
     ]
+    if len(player_h2h_games) == 0:
+        logger.info(f"PRA H2H: No games found for {player_row.get('PLAYER', '')} vs {normalized_opponent}")
 
     # ========================================================================
     # BASE FEATURES (same for all thresholds)
@@ -419,8 +501,8 @@ def reconstruct_features_for_prediction(player_row, full_df, thresholds, today_o
     # H2H average (including current game)
     features['h2h_avg'] = player_h2h_games['PRA'].mean() if len(player_h2h_games) > 0 else 0
 
-    # Opponent strength (we'll use the value from player_row as it requires complex calculation)
-    features['opp_strength'] = player_row.get('opp_strength', 0)
+    # Opponent strength - get from opponent's most recent games
+    features['opp_strength'] = get_opponent_strength(full_df, opponent, current_season)
 
     # ========================================================================
     # THRESHOLD-SPECIFIC PERCENTAGE FEATURES
@@ -808,8 +890,11 @@ def reconstruct_features_for_ra_prediction(player_row, full_df, thresholds, oppo
     # Get lineup games
     player_lineup_games = player_team_games[player_team_games['LINEUP_ID'] == lineup_id].copy()
 
-    # Get H2H games (against today's opponent) - RA data uses 'OPPONENT' not 'OPP'
-    player_h2h_games = player_team_games[player_team_games['OPPONENT'] == opponent].copy()
+    # Get H2H games (against today's opponent) - normalize opponent abbreviation first
+    normalized_opponent = normalize_team_abbreviation(opponent, full_df, player_row.get('PLAYER', ''))
+    player_h2h_games = player_team_games[player_team_games['OPPONENT'] == normalized_opponent].copy()
+    if len(player_h2h_games) == 0:
+        logger.info(f"RA H2H: No games found for {player_row.get('PLAYER', '')} vs {normalized_opponent}")
 
     # Base features
     features = {
@@ -831,8 +916,8 @@ def reconstruct_features_for_ra_prediction(player_row, full_df, thresholds, oppo
     features['lineup_average'] = player_lineup_games['RA'].mean() if len(player_lineup_games) > 0 else 0
     features['h2h_avg'] = player_h2h_games['RA'].mean() if len(player_h2h_games) > 0 else 0
 
-    # Opponent strength (simplified)
-    features['opp_strength'] = 0.0
+    # Opponent strength - get from opponent's most recent games
+    features['opp_strength'] = get_opponent_strength(full_df, opponent, current_season)
 
     # Threshold-specific percentage features
     for threshold in thresholds:
@@ -1163,8 +1248,11 @@ def reconstruct_features_for_pa_prediction(player_row, full_df, thresholds, oppo
     # Get lineup games
     player_lineup_games = player_team_games[player_team_games['LINEUP_ID'] == lineup_id].copy()
 
-    # Get H2H games (against today's opponent)
-    player_h2h_games = player_team_games[player_team_games['OPPONENT'] == opponent].copy()
+    # Get H2H games (against today's opponent) - normalize opponent abbreviation first
+    normalized_opponent = normalize_team_abbreviation(opponent, full_df, player_row.get('PLAYER', ''))
+    player_h2h_games = player_team_games[player_team_games['OPPONENT'] == normalized_opponent].copy()
+    if len(player_h2h_games) == 0:
+        logger.info(f"PA H2H: No games found for {player_row.get('PLAYER', '')} vs {normalized_opponent}")
 
     # Base features
     features = {
@@ -1186,8 +1274,8 @@ def reconstruct_features_for_pa_prediction(player_row, full_df, thresholds, oppo
     features['lineup_average'] = player_lineup_games['PA'].mean() if len(player_lineup_games) > 0 else 0
     features['h2h_avg'] = player_h2h_games['PA'].mean() if len(player_h2h_games) > 0 else 0
 
-    # Opponent strength (simplified)
-    features['opp_strength'] = 0.0
+    # Opponent strength - get from opponent's most recent games
+    features['opp_strength'] = get_opponent_strength(full_df, opponent, current_season)
 
     # Threshold-specific percentage features
     for threshold in thresholds:
@@ -1521,8 +1609,11 @@ def reconstruct_features_for_pr_prediction(player_row, full_df, thresholds, oppo
     # Get lineup games
     player_lineup_games = player_team_games[player_team_games['LINEUP_ID'] == lineup_id].copy()
 
-    # Get H2H games (against today's opponent)
-    player_h2h_games = player_team_games[player_team_games['OPPONENT'] == opponent].copy()
+    # Get H2H games (against today's opponent) - normalize opponent abbreviation first
+    normalized_opponent = normalize_team_abbreviation(opponent, full_df, player_row.get('PLAYER', ''))
+    player_h2h_games = player_team_games[player_team_games['OPPONENT'] == normalized_opponent].copy()
+    if len(player_h2h_games) == 0:
+        logger.info(f"PR H2H: No games found for {player_row.get('PLAYER', '')} vs {normalized_opponent}")
 
     # Base features
     features = {
@@ -1544,8 +1635,8 @@ def reconstruct_features_for_pr_prediction(player_row, full_df, thresholds, oppo
     features['lineup_average'] = player_lineup_games['PR'].mean() if len(player_lineup_games) > 0 else 0
     features['h2h_avg'] = player_h2h_games['PR'].mean() if len(player_h2h_games) > 0 else 0
 
-    # Opponent strength (simplified)
-    features['opp_strength'] = 0.0
+    # Opponent strength - get from opponent's most recent games
+    features['opp_strength'] = get_opponent_strength(full_df, opponent, current_season)
 
     # Threshold-specific percentage features
     for threshold in thresholds:
@@ -1896,18 +1987,22 @@ def fetch_opponent_rankings_batch(opponents):
                     }
                     continue
 
+                # Filter out "League Average" row before ranking
+                opp_stats_filtered = opp_stats[~opp_stats['Team'].str.contains('League Average', case=False, na=False)].copy()
+
                 # Calculate rankings (lower is better for defense)
-                opp_pts_rk = opp_stats.sort_values('PTS', ascending=True, ignore_index=True)
+                # Add 1 to convert from 0-based index to 1-based ranking
+                opp_pts_rk = opp_stats_filtered.sort_values('PTS', ascending=True, ignore_index=True)
                 pts_rnk = opp_pts_rk.index[opp_pts_rk['Team'] == team_name].tolist()
-                pts_rnk = pts_rnk[0] if len(pts_rnk) > 0 else 0
+                pts_rnk = (pts_rnk[0] + 1) if len(pts_rnk) > 0 else 0
 
-                opp_trb_rk = opp_stats.sort_values('TRB', ascending=True, ignore_index=True)
+                opp_trb_rk = opp_stats_filtered.sort_values('TRB', ascending=True, ignore_index=True)
                 trb_rnk = opp_trb_rk.index[opp_trb_rk['Team'] == team_name].tolist()
-                trb_rnk = trb_rnk[0] if len(trb_rnk) > 0 else 0
+                trb_rnk = (trb_rnk[0] + 1) if len(trb_rnk) > 0 else 0
 
-                opp_ast_rk = opp_stats.sort_values('AST', ascending=True, ignore_index=True)
+                opp_ast_rk = opp_stats_filtered.sort_values('AST', ascending=True, ignore_index=True)
                 ast_rnk = opp_ast_rk.index[opp_ast_rk['Team'] == team_name].tolist()
-                ast_rnk = ast_rnk[0] if len(ast_rnk) > 0 else 0
+                ast_rnk = (ast_rnk[0] + 1) if len(ast_rnk) > 0 else 0
 
                 rankings[opp_abbr] = {
                     'OPP_PTS_RANK': pts_rnk,
