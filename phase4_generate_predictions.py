@@ -2149,9 +2149,9 @@ def get_injured_players():
             for row in rows:
                 cells = row.find_all('td')
                 if len(cells) >= 4:
-                    # ESPN table columns: Name, Position, Status, Comment, Date
+                    # ESPN table columns: Name (0), Position (1), Return Date (2), Status/Comment (3)
                     name_cell = cells[0]
-                    date_cell = cells[-1]  # Last column is usually the date
+                    date_cell = cells[2]  # Third column has the return date
 
                     # Extract player name
                     player_name = name_cell.get_text(strip=True)
