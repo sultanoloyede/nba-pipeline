@@ -890,9 +890,13 @@ def reconstruct_features_for_ra_prediction(player_row, full_df, thresholds, oppo
     # Get lineup games
     player_lineup_games = player_team_games[player_team_games['LINEUP_ID'] == lineup_id].copy()
 
-    # Get H2H games (against today's opponent) - normalize opponent abbreviation first
+    # Get H2H games (last 3 seasons) - normalize opponent abbreviation first
     normalized_opponent = normalize_team_abbreviation(opponent, full_df, player_row.get('PLAYER', ''))
-    player_h2h_games = player_team_games[player_team_games['OPPONENT'] == normalized_opponent].copy()
+    target_seasons = [current_season, current_season - 1, current_season - 2]
+    player_h2h_games = player_all_games[
+        (player_all_games['OPPONENT'] == normalized_opponent) &
+        (player_all_games['SEASON_ID'].isin(target_seasons))
+    ].copy()
     if len(player_h2h_games) == 0:
         logger.info(f"RA H2H: No games found for {player_row.get('PLAYER', '')} vs {normalized_opponent}")
 
@@ -1248,9 +1252,13 @@ def reconstruct_features_for_pa_prediction(player_row, full_df, thresholds, oppo
     # Get lineup games
     player_lineup_games = player_team_games[player_team_games['LINEUP_ID'] == lineup_id].copy()
 
-    # Get H2H games (against today's opponent) - normalize opponent abbreviation first
+    # Get H2H games (last 3 seasons) - normalize opponent abbreviation first
     normalized_opponent = normalize_team_abbreviation(opponent, full_df, player_row.get('PLAYER', ''))
-    player_h2h_games = player_team_games[player_team_games['OPPONENT'] == normalized_opponent].copy()
+    target_seasons = [current_season, current_season - 1, current_season - 2]
+    player_h2h_games = player_all_games[
+        (player_all_games['OPPONENT'] == normalized_opponent) &
+        (player_all_games['SEASON_ID'].isin(target_seasons))
+    ].copy()
     if len(player_h2h_games) == 0:
         logger.info(f"PA H2H: No games found for {player_row.get('PLAYER', '')} vs {normalized_opponent}")
 
@@ -1609,9 +1617,13 @@ def reconstruct_features_for_pr_prediction(player_row, full_df, thresholds, oppo
     # Get lineup games
     player_lineup_games = player_team_games[player_team_games['LINEUP_ID'] == lineup_id].copy()
 
-    # Get H2H games (against today's opponent) - normalize opponent abbreviation first
+    # Get H2H games (last 3 seasons) - normalize opponent abbreviation first
     normalized_opponent = normalize_team_abbreviation(opponent, full_df, player_row.get('PLAYER', ''))
-    player_h2h_games = player_team_games[player_team_games['OPPONENT'] == normalized_opponent].copy()
+    target_seasons = [current_season, current_season - 1, current_season - 2]
+    player_h2h_games = player_all_games[
+        (player_all_games['OPPONENT'] == normalized_opponent) &
+        (player_all_games['SEASON_ID'].isin(target_seasons))
+    ].copy()
     if len(player_h2h_games) == 0:
         logger.info(f"PR H2H: No games found for {player_row.get('PLAYER', '')} vs {normalized_opponent}")
 
