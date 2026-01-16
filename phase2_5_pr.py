@@ -178,7 +178,7 @@ def calculate_rolling_percentage_all_thresholds_vectorized(df: pd.DataFrame, thr
     - Progress logging every 100 groups to maintain Modal heartbeat
 
     Args:
-        df: DataFrame with RA, Player_ID, TEAM, SEASON_ID, GAME_DATE_PARSED
+        df: DataFrame with PR, Player_ID, TEAM, SEASON_ID, GAME_DATE_PARSED
         thresholds: List of PR thresholds to calculate percentages for
         window: Rolling window size (5, 10, or 20)
 
@@ -235,7 +235,7 @@ def calculate_season_percentage_all_thresholds_vectorized(df: pd.DataFrame, thre
     - Calculate for all thresholds at once using vectorized operations
 
     Args:
-        df: DataFrame with RA, Player_ID, TEAM, SEASON_ID, GAME_DATE_PARSED
+        df: DataFrame with PR, Player_ID, TEAM, SEASON_ID, GAME_DATE_PARSED
         thresholds: List of PR thresholds
 
     Returns:
@@ -276,7 +276,7 @@ def calculate_last_season_percentage_all_thresholds_vectorized(df: pd.DataFrame,
     - Merge back to main dataframe
 
     Args:
-        df: DataFrame with RA, Player_ID, SEASON_ID
+        df: DataFrame with PR, Player_ID, SEASON_ID
         thresholds: List of PR thresholds
 
     Returns:
@@ -322,7 +322,7 @@ def calculate_lineup_percentage_all_thresholds_vectorized(df: pd.DataFrame, thre
     - Progress logging every 500 groups
 
     Args:
-        df: DataFrame with RA, Player_ID, TEAM, LINEUP_ID, GAME_DATE_PARSED
+        df: DataFrame with PR, Player_ID, TEAM, LINEUP_ID, GAME_DATE_PARSED
         thresholds: List of PR thresholds
 
     Returns:
@@ -394,8 +394,8 @@ def calculate_lineup_percentage_all_thresholds_vectorized(df: pd.DataFrame, thre
                         threshold_results[threshold][idx] = 0.0
 
                     # Add current game's PR to the list for future first-lineup-games
-                    current_ra = pt_group.iloc[i]['PR']
-                    first_lineup_ras.append(current_ra)
+                    current_pr = pt_group.iloc[i]['PR']
+                    first_lineup_ras.append(current_pr)
 
     logger.info(f"    ✓ Completed lineup_pct for all thresholds")
     return threshold_results
@@ -416,7 +416,7 @@ def calculate_h2h_percentage_all_thresholds_vectorized(df: pd.DataFrame, thresho
     - Progress logging every 500 groups
 
     Args:
-        df: DataFrame with RA, Player_ID, OPPONENT, SEASON_ID, GAME_DATE_PARSED
+        df: DataFrame with PR, Player_ID, OPPONENT, SEASON_ID, GAME_DATE_PARSED
         thresholds: List of PR thresholds
 
     Returns:
@@ -513,8 +513,8 @@ def run_phase_2_5_pr(s3_handler, threshold_start=8, threshold_end=41, force_repr
 
         # Ensure PR column exists
         if 'PR' not in df.columns:
-            logger.error("RA column not found in processed data")
-            return False, {'error': 'RA column missing'}
+            logger.error("PR column not found in processed data")
+            return False, {'error': 'PR column missing'}
 
         # Step 2: Calculate percentage columns for all thresholds (VECTORIZED)
         thresholds = list(range(threshold_start, threshold_end))
@@ -557,8 +557,68 @@ def run_phase_2_5_pr(s3_handler, threshold_start=8, threshold_end=41, force_repr
             df[f'h2h_pct_{threshold}'] = pct_array
         logger.info(f"  ✓ Added h2h_pct columns for all thresholds")
 
+        # Step 2.5: Remove any unwanted threshold columns (5, 6, 7) and reorder columns
+        logger.info("\n[6/7] Cleaning up and reordering columns...")
+
+        # Remove any percentage columns for thresholds 5, 6, 7 (from old range 5-40)
+        unwanted_thresholds = [5, 6, 7]
+        unwanted_columns = []
+        for t in unwanted_thresholds:
+            unwanted_columns.extend([
+                f'last_5_pct_{t}', f'last_10_pct_{t}', f'last_20_pct_{t}',
+                f'season_pct_{t}', f'last_season_pct_{t}',
+                f'lineup_pct_{t}', f'h2h_pct_{t}'
+            ])
+
+        columns_to_drop = [col for col in unwanted_columns if col in df.columns]
+        if columns_to_drop:
+            df = df.drop(columns=columns_to_drop)
+            logger.info(f"  ✓ Removed {len(columns_to_drop)} unwanted threshold columns (5, 6, 7)")
+
+        # Define proper column order
+        base_columns = ['Player_ID', 'PLAYER_NAME', 'Game_ID', 'GAME_DATE', 'GAME_DATE_PARSED',
+                       'MATCHUP', 'TEAM', 'OPPONENT', 'SEASON_ID']
+
+        # PR should come right after player identifiers
+        stat_columns = ['PR', 'PTS', 'REB', 'AST', 'STL', 'BLK', 'TOV', 'FGM', 'FGA',
+                       'FG_PCT', 'FG3M', 'FG3A', 'FG3_PCT', 'FTM', 'FTA', 'FT_PCT',
+                       'OREB', 'DREB', 'PF', 'PLUS_MINUS', 'MIN']
+
+        # Averages: season_avg and last_season_avg should be together
+        average_columns = ['last_5_avg', 'last_10_avg', 'last_20_avg',
+                          'season_avg', 'last_season_avg',
+                          'lineup_average', 'h2h_avg', 'opp_strength']
+
+        # Percentage columns for each threshold (in order: 8, 9, ..., 40)
+        pct_columns = []
+        for threshold in sorted(thresholds):
+            pct_columns.extend([
+                f'last_5_pct_{threshold}',
+                f'last_10_pct_{threshold}',
+                f'last_20_pct_{threshold}',
+                f'season_pct_{threshold}',
+                f'last_season_pct_{threshold}',
+                f'lineup_pct_{threshold}',
+                f'h2h_pct_{threshold}'
+            ])
+
+        # Other metadata columns
+        other_columns = ['LINEUP_ID', 'WL', 'VIDEO_AVAILABLE']
+
+        # Combine in desired order
+        desired_order = base_columns + stat_columns + average_columns + pct_columns + other_columns
+        existing_columns = [col for col in desired_order if col in df.columns]
+
+        # Add any remaining columns not in our list (shouldn't be any)
+        remaining_columns = [col for col in df.columns if col not in existing_columns]
+        final_column_order = existing_columns + remaining_columns
+
+        # Reorder
+        df = df[final_column_order]
+        logger.info(f"  ✓ Columns reordered. Total columns: {len(df.columns)}")
+
         # Step 3: Save to S3
-        logger.info("\n[6/7] Saving pre-calculated PR data to S3...")
+        logger.info("\n[7/7] Saving pre-calculated PR data to S3...")
         output_key = f'processed_data_pr/processed_with_pr_pct_{threshold_start}-{threshold_end - 1}.csv'
 
         # Calculate file size before upload

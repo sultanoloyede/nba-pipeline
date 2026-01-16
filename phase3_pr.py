@@ -1,14 +1,14 @@
 """
 Phase 3 PR: Fast Model Training for PR (OPTIMIZED - Using Pre-calculated Percentages)
 
-This is the RA-specific implementation for training models on PR (Points + Rebounds).
+This is the PR-specific implementation for training models on PR (Points + Rebounds).
 
 Key Optimizations:
-1. Downloads comprehensive PR file with ALL threshold columns ONCE (not 34 times)
-2. Reuses the DataFrame for all 34 models (thresholds 8-41)
+1. Downloads comprehensive PR file with ALL threshold columns ONCE (not 33 times)
+2. Reuses the DataFrame for all 33 models (thresholds 8-40)
 3. Just filters columns per threshold (no repeated downloads)
 4. Pre-calculated percentages make training ~10x faster
-5. Expected time: 15-20 minutes for all 34 models
+5. Expected time: 15-20 minutes for all 33 models
 
 Author: NBA Props Prediction System
 Date: 2025-12-31
@@ -41,7 +41,7 @@ def train_model_for_threshold(df_all: pd.DataFrame, threshold: int) -> Tuple[xgb
         Tuple of (model, precision, metrics_dict)
     """
     logger.info(f"\n{'='*80}")
-    logger.info(f"Training model for {threshold}+ RA")
+    logger.info(f"Training model for {threshold}+ PR")
     logger.info(f"{'='*80}")
 
     # Step 1: Create target variable
@@ -129,20 +129,20 @@ def train_model_for_threshold(df_all: pd.DataFrame, threshold: int) -> Tuple[xgb
         'n_features': X.shape[1]
     }
 
-    logger.info(f"  {threshold}+ RA: Precision = {precision:.4f}")
+    logger.info(f"  {threshold}+ PR: Precision = {precision:.4f}")
     logger.info(f"  Accuracy = {accuracy:.4f}")
     logger.info(f"  TP: {tp}, FP: {fp}, TN: {tn}, FN: {fn}")
 
     return model, precision, metrics
 
 
-def run_phase_3_pr(s3_handler, threshold_start: int = 8, threshold_end: int = 41) -> Tuple[bool, Dict]:
+def run_phase_3_pr(s3_handler, threshold_start: int = 8, threshold_end: int = 40) -> Tuple[bool, Dict]:
     """
     Execute Phase 3 PR (OPTIMIZED): Model Training for PR using pre-calculated percentages.
 
-    This is the RA-specific implementation that:
+    This is the PR-specific implementation that:
     1. Downloads comprehensive PR file ONCE
-    2. Reuses DataFrame for all 34 models (thresholds 8-41)
+    2. Reuses DataFrame for all 33 models (thresholds 8-40)
     3. Trains models sequentially (one threshold at a time)
     4. Saves each model to S3 immediately in separate PR folder
 
@@ -152,13 +152,13 @@ def run_phase_3_pr(s3_handler, threshold_start: int = 8, threshold_end: int = 41
     Args:
         s3_handler: S3Handler instance
         threshold_start: Starting threshold (default: 8 for PR, representing o/u 7.5)
-        threshold_end: Ending threshold (default: 41 for PR, so thresholds 8-40 inclusive representing o/u 7.5-40.5)
+        threshold_end: Ending threshold (default: 40 for PR, so thresholds 8-40 inclusive representing o/u 7.5-39.5)
 
     Returns:
         Tuple of (success: bool, stats: dict)
     """
     logger.info("=" * 80)
-    logger.info("PHASE 3 PR (OPTIMIZED): FAST MODEL TRAINING FOR RA")
+    logger.info("PHASE 3 PR (OPTIMIZED): FAST MODEL TRAINING FOR PR")
     logger.info("=" * 80)
     logger.info(f"Stat Type: PR (Points + Rebounds)")
     logger.info(f"Threshold range: {threshold_start}-{threshold_end}")
@@ -270,7 +270,7 @@ def run_phase_3_pr(s3_handler, threshold_start: int = 8, threshold_end: int = 41
             precision = metrics['precision']
             accuracy = metrics['accuracy']
             logger.info(
-                f"  {threshold:2d}+ RA: "
+                f"  {threshold:2d}+ PR: "
                 f"Precision={precision:.4f}, "
                 f"Accuracy={accuracy:.4f}, "
                 f"Features={metrics['n_features']}"
@@ -318,9 +318,9 @@ if __name__ == '__main__':
 
     s3_handler = S3Handler()
 
-    # Train PR models (thresholds 8-41, representing o/u 7.5-40.5)
-    print("\nTraining PR models (thresholds 8-41)...")
-    success, stats = run_phase_3_pr(s3_handler, threshold_start=8, threshold_end=41)
+    # Train PR models (thresholds 8-40, representing o/u 7.5-39.5)
+    print("\nTraining PR models (thresholds 8-40)...")
+    success, stats = run_phase_3_pr(s3_handler, threshold_start=8, threshold_end=40)
 
     if success:
         print("\n✓ Phase 3 PR (Optimized) completed successfully!")

@@ -275,7 +275,7 @@ def calculate_opponent_strength_vectorized(df: pd.DataFrame) -> pd.DataFrame:
     against this opponent in the current season.
 
     Args:
-        df: DataFrame with OPPONENT, SEASON_ID, RA, last_5_avg columns
+        df: DataFrame with OPPONENT, SEASON_ID, PR, last_5_avg columns
 
     Returns:
         DataFrame with opp_strength column added
@@ -451,6 +451,38 @@ def run_phase_2_pr(s3_handler) -> Tuple[bool, dict]:
         # Step 8: Calculate opponent strength (VECTORIZED)
         logger.info("\nStep 8: Calculating opponent strength (vectorized)...")
         combined_df = calculate_opponent_strength_vectorized(combined_df)
+
+        # Step 8.5: Reorder columns for better readability
+        logger.info("\nStep 8.5: Reordering columns...")
+
+        # Define column order: identifiers first, then PR, then averages, then percentages
+        base_columns = ['Player_ID', 'PLAYER_NAME', 'Game_ID', 'GAME_DATE', 'GAME_DATE_PARSED',
+                       'MATCHUP', 'TEAM', 'OPPONENT', 'SEASON_ID']
+
+        # PR should come right after player identifiers
+        stat_columns = ['PR', 'PTS', 'REB', 'AST', 'STL', 'BLK', 'TOV', 'FGM', 'FGA',
+                       'FG_PCT', 'FG3M', 'FG3A', 'FG3_PCT', 'FTM', 'FTA', 'FT_PCT',
+                       'OREB', 'DREB', 'PF', 'PLUS_MINUS', 'MIN']
+
+        # Averages: season_avg and last_season_avg should be together
+        average_columns = ['last_5_avg', 'last_10_avg', 'last_20_avg',
+                          'season_avg', 'last_season_avg',
+                          'lineup_average', 'h2h_avg', 'opp_strength']
+
+        # Lineup and other metadata
+        other_columns = ['LINEUP_ID', 'WL', 'VIDEO_AVAILABLE']
+
+        # Combine in desired order, only including columns that exist
+        desired_order = base_columns + stat_columns + average_columns + other_columns
+        existing_columns = [col for col in desired_order if col in combined_df.columns]
+
+        # Add any remaining columns not in our desired order (shouldn't be any, but just in case)
+        remaining_columns = [col for col in combined_df.columns if col not in existing_columns]
+        final_column_order = existing_columns + remaining_columns
+
+        # Reorder
+        combined_df = combined_df[final_column_order]
+        logger.info(f"  ✓ Columns reordered. Total columns: {len(combined_df.columns)}")
 
         # Step 9: Save to S3 in PR folder
         logger.info("\nStep 9: Saving processed PR data to S3...")
