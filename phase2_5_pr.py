@@ -461,7 +461,7 @@ def calculate_h2h_percentage_all_thresholds_vectorized(df: pd.DataFrame, thresho
     return threshold_results
 
 
-def run_phase_2_5_pr(s3_handler, threshold_start=8, threshold_end=41, force_reprocess=False) -> Tuple[bool, dict]:
+def run_phase_2_5_pr(s3_handler, threshold_start=8, threshold_end=42, force_reprocess=False) -> Tuple[bool, dict]:
     """
     Execute Phase 2.5 PR: Pre-calculate ALL percentage columns for PR thresholds.
 
@@ -478,7 +478,7 @@ def run_phase_2_5_pr(s3_handler, threshold_start=8, threshold_end=41, force_repr
     Args:
         s3_handler: S3Handler instance
         threshold_start: Starting threshold (default: 8 for PR)
-        threshold_end: Ending threshold + 1 (default: 41, so thresholds 8-40)
+        threshold_end: Ending threshold + 1 (default: 42, so thresholds 8-41)
         force_reprocess: Force reprocessing even if metadata says it's not needed
 
     Returns:
