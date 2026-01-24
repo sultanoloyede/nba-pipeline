@@ -359,12 +359,12 @@ def calculate_games_missed_vectorized(df: pd.DataFrame) -> pd.DataFrame:
         # Subtract 1 day for normal rest (back-to-back is 1 day, normal is 2-3 days)
         games_missed = np.floor(np.maximum(0, days_since_last_game - 1) / 2.2)
 
-        # Fill NaN (first game for player-team) with 0
+        # Fill NaN (first game for player-season) with 0
         games_missed = games_missed.fillna(0.0)
 
-        # Shift by 1 to exclude current game (consistent with other features)
-        # For the first game after shift, this will be NaN, which we'll fill with 0
-        group['games_missed'] = games_missed.shift(1).fillna(0.0)
+        # NO shift(1) needed - diff() already looks backward one row
+        # games_missed[N] represents gap between game[N-1] and game[N]
+        group['games_missed'] = games_missed
 
         return group
 
