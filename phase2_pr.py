@@ -324,6 +324,72 @@ def calculate_opponent_strength_vectorized(df: pd.DataFrame) -> pd.DataFrame:
     return result
 
 
+def calculate_games_missed_vectorized(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Calculate games missed between consecutive games using VECTORIZED operations.
+
+    Games missed = number of games a player's team played between their last game
+    and the current game. This helps identify players returning from injury or rest.
+
+    Calculation:
+    - Calculate days between consecutive games for each player-team
+    - Estimate games missed using NBA average schedule (1 game per ~2.2 days)
+    - Use shift(1) to exclude current game (consistent with other features)
+
+    Args:
+        df: DataFrame with Player_ID, TEAM, GAME_DATE_PARSED columns
+
+    Returns:
+        DataFrame with games_missed column added
+    """
+    logger.info("Calculating games missed (vectorized)...")
+
+    # Sort oldest to newest for diff calculations
+    df = df.sort_values(['Player_ID', 'TEAM', 'GAME_DATE_PARSED'])
+
+    # Group by player and team
+    grouped = df.groupby(['Player_ID', 'TEAM'], group_keys=False)
+    total_groups = len(grouped)
+    logger.info(f"  Processing {total_groups} player-team groups...")
+
+    def calculate_games_missed_for_group(group):
+        """Calculate games missed for a single player-team group."""
+        group = group.sort_values('GAME_DATE_PARSED')
+
+        # Calculate days between consecutive games (vectorized)
+        # diff() returns NaT for first game, which becomes NaN when we convert to days
+        days_since_last_game = group['GAME_DATE_PARSED'].diff().dt.days
+
+        # Estimate games missed based on NBA schedule
+        # NBA teams play ~82 games in ~180 days (Oct-Apr) = 1 game per 2.2 days
+        # If a player missed 5 days, that's roughly 5/2.2 ≈ 2.3 games, floor to 2
+        # Subtract 1 day for normal rest (back-to-back is 1 day, normal is 2-3 days)
+        games_missed = np.floor(np.maximum(0, days_since_last_game - 1) / 2.2)
+
+        # Fill NaN (first game for player-team) with 0
+        games_missed = games_missed.fillna(0.0)
+
+        # Shift by 1 to exclude current game (consistent with other features)
+        # For the first game after shift, this will be NaN, which we'll fill with 0
+        group['games_missed'] = games_missed.shift(1).fillna(0.0)
+
+        return group
+
+    results = []
+    for i, (name, group) in enumerate(grouped):
+        if i % 100 == 0 and i > 0:
+            logger.info(f"    Progress: {i}/{total_groups} groups processed")
+        results.append(calculate_games_missed_for_group(group))
+
+    result = pd.concat(results)
+
+    # Sort back to newest first
+    result = result.sort_values(['Player_ID', 'GAME_DATE_PARSED'], ascending=[True, False])
+
+    logger.info("✓ Games missed calculated")
+    return result
+
+
 def run_phase_2_pr(s3_handler) -> Tuple[bool, dict]:
     """
     Execute Phase 2 PR: Data Processing for PR (Points + Rebounds).
@@ -452,7 +518,11 @@ def run_phase_2_pr(s3_handler) -> Tuple[bool, dict]:
         logger.info("\nStep 8: Calculating opponent strength (vectorized)...")
         combined_df = calculate_opponent_strength_vectorized(combined_df)
 
-        # Step 8.5: Reorder columns for better readability
+        # Step 8.5: Calculate games missed (VECTORIZED)
+        logger.info("\nStep 8.5: Calculating games missed (vectorized)...")
+        combined_df = calculate_games_missed_vectorized(combined_df)
+
+        # Step 8.6: Reorder columns for better readability
         logger.info("\nStep 8.5: Reordering columns...")
 
         # Define column order: identifiers first, then PR, then averages, then percentages
@@ -467,7 +537,7 @@ def run_phase_2_pr(s3_handler) -> Tuple[bool, dict]:
         # Averages: season_avg and last_season_avg should be together
         average_columns = ['last_5_avg', 'last_10_avg', 'last_20_avg',
                           'season_avg', 'last_season_avg',
-                          'lineup_average', 'h2h_avg', 'opp_strength']
+                          'lineup_average', 'h2h_avg', 'opp_strength', 'games_missed']
 
         # Lineup and other metadata
         other_columns = ['LINEUP_ID', 'WL', 'VIDEO_AVAILABLE']
@@ -502,7 +572,7 @@ def run_phase_2_pr(s3_handler) -> Tuple[bool, dict]:
             'features_added': [
                 'PR', 'GAME_DATE_PARSED', 'TEAM', 'OPPONENT',
                 'lineup_average', 'last_5_avg', 'last_10_avg', 'last_20_avg',
-                'season_avg', 'last_season_avg', 'h2h_avg', 'opp_strength'
+                'season_avg', 'last_season_avg', 'h2h_avg', 'opp_strength', 'games_missed'
             ],
             'optimization': 'VECTORIZED - 10-50x faster than iterrows',
             'stat_type': 'PR (Points + Rebounds)'

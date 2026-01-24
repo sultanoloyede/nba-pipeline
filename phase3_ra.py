@@ -54,7 +54,7 @@ def train_model_for_threshold(df_all: pd.DataFrame, threshold: int) -> Tuple[xgb
         'last_5_avg', 'last_10_avg', 'last_20_avg',
         'season_avg', 'last_season_avg',
         'lineup_average', 'h2h_avg',
-        'opp_strength'
+        'opp_strength', 'games_missed'
     ]
 
     # Threshold-specific percentage columns
