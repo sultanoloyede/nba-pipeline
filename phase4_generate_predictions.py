@@ -426,7 +426,7 @@ def normalize_team_abbreviation(team_abbr, full_df, player_name=""):
     return team_abbr
 
 
-def reconstruct_features_for_prediction(player_row, full_df, thresholds, today_opponent):
+def reconstruct_features_for_prediction(player_row, full_df, thresholds, today_opponent, prediction_date=None):
     """
     Reconstruct features by INCLUDING the current game's PRA for future prediction.
 
@@ -439,10 +439,14 @@ def reconstruct_features_for_prediction(player_row, full_df, thresholds, today_o
         full_df: Full processed dataset with all player histories
         thresholds: List of PRA thresholds (10-51)
         today_opponent: Today's actual opponent from team matchups (not from player_row)
+        prediction_date: Date we're predicting for (default: today)
 
     Returns:
         dict: Reconstructed features including current game's PRA
     """
+    from datetime import date as date_module
+    if prediction_date is None:
+        prediction_date = pd.to_datetime(date_module.today())
     player_id = player_row['Player_ID']
     team = player_row['TEAM']
     current_date = player_row['GAME_DATE_PARSED']
@@ -504,21 +508,19 @@ def reconstruct_features_for_prediction(player_row, full_df, thresholds, today_o
     # Opponent strength - get from opponent's most recent games
     features['opp_strength'] = get_opponent_strength(full_df, opponent, current_season)
 
-    # Games missed - calculate days since last game and estimate games missed
+    # Games missed - calculate days since last game TO TODAY (the game we're predicting)
     # Use player_season_games (not player_team_games) so trades don't reset the counter
-    if len(player_season_games) >= 2:
-        # Get the two most recent games in the season
-        last_two_games = player_season_games.tail(2)
-        last_game_date = last_two_games.iloc[-1]['GAME_DATE_PARSED']
-        second_last_game_date = last_two_games.iloc[-2]['GAME_DATE_PARSED']
+    if len(player_season_games) >= 1:
+        # Get the most recent game
+        last_game_date = player_season_games.iloc[-1]['GAME_DATE_PARSED']
 
-        # Calculate days between games
-        days_diff = (last_game_date - second_last_game_date).days
+        # Calculate days from most recent game to prediction date (TODAY)
+        days_diff = (prediction_date - last_game_date).days
 
         # Estimate games missed (1 game per 2.2 days, subtract 1 day for normal rest)
         features['games_missed'] = max(0, np.floor((days_diff - 1) / 2.2))
     else:
-        # First or second game for this player in the season, no games missed
+        # First game for this player in the season, no games missed
         features['games_missed'] = 0.0
 
     # ========================================================================
@@ -872,7 +874,7 @@ def calculate_display_metrics(reconstructed_features, threshold):
 # RA GAUNTLET FUNCTIONS (Rebounds + Assists)
 # ============================================================================
 
-def reconstruct_features_for_ra_prediction(player_row, full_df, thresholds, opponent):
+def reconstruct_features_for_ra_prediction(player_row, full_df, thresholds, opponent, prediction_date=None):
     """
     Reconstruct RA-specific features for prediction.
 
@@ -881,10 +883,14 @@ def reconstruct_features_for_ra_prediction(player_row, full_df, thresholds, oppo
         full_df: Full RA processed dataset
         thresholds: List of RA thresholds to reconstruct (5-26)
         opponent: Opponent team abbreviation
+        prediction_date: Date we're predicting for (default: today)
 
     Returns:
         dict: Reconstructed features for RA prediction
     """
+    from datetime import date as date_module
+    if prediction_date is None:
+        prediction_date = pd.to_datetime(date_module.today())
     player_id = player_row['Player_ID']
     lineup_id = player_row['LINEUP_ID']
     team = player_row['TEAM']
@@ -940,21 +946,19 @@ def reconstruct_features_for_ra_prediction(player_row, full_df, thresholds, oppo
     # Opponent strength - get from opponent's most recent games
     features['opp_strength'] = get_opponent_strength(full_df, opponent, current_season)
 
-    # Games missed - calculate days since last game and estimate games missed
+    # Games missed - calculate days since last game TO TODAY (the game we're predicting)
     # Use player_season_games (not player_team_games) so trades don't reset the counter
-    if len(player_season_games) >= 2:
-        # Get the two most recent games in the season
-        last_two_games = player_season_games.tail(2)
-        last_game_date = last_two_games.iloc[-1]['GAME_DATE_PARSED']
-        second_last_game_date = last_two_games.iloc[-2]['GAME_DATE_PARSED']
+    if len(player_season_games) >= 1:
+        # Get the most recent game
+        last_game_date = player_season_games.iloc[-1]['GAME_DATE_PARSED']
 
-        # Calculate days between games
-        days_diff = (last_game_date - second_last_game_date).days
+        # Calculate days from most recent game to prediction date (TODAY)
+        days_diff = (prediction_date - last_game_date).days
 
         # Estimate games missed (1 game per 2.2 days, subtract 1 day for normal rest)
         features['games_missed'] = max(0, np.floor((days_diff - 1) / 2.2))
     else:
-        # First or second game for this player in the season, no games missed
+        # First game for this player in the season, no games missed
         features['games_missed'] = 0.0
 
     # Threshold-specific percentage features
@@ -1251,7 +1255,7 @@ def run_ra_gauntlet_for_player(player_row, models, team_matchups, full_df):
 # PA GAUNTLET FUNCTIONS (Points + Assists)
 # ============================================================================
 
-def reconstruct_features_for_pa_prediction(player_row, full_df, thresholds, opponent):
+def reconstruct_features_for_pa_prediction(player_row, full_df, thresholds, opponent, prediction_date=None):
     """
     Reconstruct PA-specific features for prediction.
 
@@ -1260,10 +1264,14 @@ def reconstruct_features_for_pa_prediction(player_row, full_df, thresholds, oppo
         full_df: Full PA processed dataset
         thresholds: List of PA thresholds to reconstruct (5-39)
         opponent: Opponent team abbreviation
+        prediction_date: Date we're predicting for (default: today)
 
     Returns:
         dict: Reconstructed features for PA prediction
     """
+    from datetime import date as date_module
+    if prediction_date is None:
+        prediction_date = pd.to_datetime(date_module.today())
     player_id = player_row['Player_ID']
     lineup_id = player_row['LINEUP_ID']
     team = player_row['TEAM']
@@ -1319,21 +1327,19 @@ def reconstruct_features_for_pa_prediction(player_row, full_df, thresholds, oppo
     # Opponent strength - get from opponent's most recent games
     features['opp_strength'] = get_opponent_strength(full_df, opponent, current_season)
 
-    # Games missed - calculate days since last game and estimate games missed
+    # Games missed - calculate days since last game TO TODAY (the game we're predicting)
     # Use player_season_games (not player_team_games) so trades don't reset the counter
-    if len(player_season_games) >= 2:
-        # Get the two most recent games in the season
-        last_two_games = player_season_games.tail(2)
-        last_game_date = last_two_games.iloc[-1]['GAME_DATE_PARSED']
-        second_last_game_date = last_two_games.iloc[-2]['GAME_DATE_PARSED']
+    if len(player_season_games) >= 1:
+        # Get the most recent game
+        last_game_date = player_season_games.iloc[-1]['GAME_DATE_PARSED']
 
-        # Calculate days between games
-        days_diff = (last_game_date - second_last_game_date).days
+        # Calculate days from most recent game to prediction date (TODAY)
+        days_diff = (prediction_date - last_game_date).days
 
         # Estimate games missed (1 game per 2.2 days, subtract 1 day for normal rest)
         features['games_missed'] = max(0, np.floor((days_diff - 1) / 2.2))
     else:
-        # First or second game for this player in the season, no games missed
+        # First game for this player in the season, no games missed
         features['games_missed'] = 0.0
 
     # Threshold-specific percentage features
@@ -1633,7 +1639,7 @@ def run_pa_gauntlet_for_player(player_row, models, team_matchups, full_df):
 # PR GAUNTLET FUNCTIONS (Points + Rebounds)
 # ============================================================================
 
-def reconstruct_features_for_pr_prediction(player_row, full_df, thresholds, opponent):
+def reconstruct_features_for_pr_prediction(player_row, full_df, thresholds, opponent, prediction_date=None):
     """
     Reconstruct PR-specific features for prediction.
 
@@ -1642,10 +1648,14 @@ def reconstruct_features_for_pr_prediction(player_row, full_df, thresholds, oppo
         full_df: Full PR processed dataset
         thresholds: List of PR thresholds to reconstruct (5-39)
         opponent: Opponent team abbreviation
+        prediction_date: Date we're predicting for (default: today)
 
     Returns:
         dict: Reconstructed features for PR prediction
     """
+    from datetime import date as date_module
+    if prediction_date is None:
+        prediction_date = pd.to_datetime(date_module.today())
     player_id = player_row['Player_ID']
     lineup_id = player_row['LINEUP_ID']
     team = player_row['TEAM']
@@ -1701,21 +1711,19 @@ def reconstruct_features_for_pr_prediction(player_row, full_df, thresholds, oppo
     # Opponent strength - get from opponent's most recent games
     features['opp_strength'] = get_opponent_strength(full_df, opponent, current_season)
 
-    # Games missed - calculate days since last game and estimate games missed
+    # Games missed - calculate days since last game TO TODAY (the game we're predicting)
     # Use player_season_games (not player_team_games) so trades don't reset the counter
-    if len(player_season_games) >= 2:
-        # Get the two most recent games in the season
-        last_two_games = player_season_games.tail(2)
-        last_game_date = last_two_games.iloc[-1]['GAME_DATE_PARSED']
-        second_last_game_date = last_two_games.iloc[-2]['GAME_DATE_PARSED']
+    if len(player_season_games) >= 1:
+        # Get the most recent game
+        last_game_date = player_season_games.iloc[-1]['GAME_DATE_PARSED']
 
-        # Calculate days between games
-        days_diff = (last_game_date - second_last_game_date).days
+        # Calculate days from most recent game to prediction date (TODAY)
+        days_diff = (prediction_date - last_game_date).days
 
         # Estimate games missed (1 game per 2.2 days, subtract 1 day for normal rest)
         features['games_missed'] = max(0, np.floor((days_diff - 1) / 2.2))
     else:
-        # First or second game for this player in the season, no games missed
+        # First game for this player in the season, no games missed
         features['games_missed'] = 0.0
 
     # Threshold-specific percentage features
