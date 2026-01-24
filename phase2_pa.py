@@ -326,69 +326,83 @@ def calculate_opponent_strength_vectorized(df: pd.DataFrame) -> pd.DataFrame:
 
 def calculate_games_missed_vectorized(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Calculate games missed between consecutive games using VECTORIZED operations.
+    Calculate games missed between consecutive player appearances using ACTUAL team game counts.
 
-    Games missed = number of games missed between player's consecutive games within a season.
-    This helps identify players returning from injury or rest.
+    Uses VECTORIZED pandas operations (no loops over rows) for maximum performance.
 
-    Calculation:
-    - Calculate days between consecutive games for each player-season (NOT player-team)
-    - This ensures trades don't reset the counter - a player traded mid-season continues their streak
-    - Estimate games missed using NBA average schedule (1 game per ~2.2 days)
-    - Use shift(1) to exclude current game (consistent with other features)
+    Logic:
+    - Same team: Count actual team games between player appearances (handles NBA breaks correctly)
+    - New team (trade): Estimate based on days elapsed (can't use new team's game sequence)
+
+    Example 1 (NBA break):
+    - Player appears in Team's game #10 (March 10, 2020)
+    - COVID shutdown happens (no games for 4 months)
+    - Player appears in Team's game #11 (July 30, 2020)
+    - games_missed = 11 - 10 - 1 = 0 ✓ (correctly shows 0 games missed)
+
+    Example 2 (Trade):
+    - Player plays for LAL on March 1 (team game #60)
+    - Gets traded to BOS on March 5
+    - Plays for BOS on March 10 (team game #62, but player wasn't on BOS for #61)
+    - games_missed = estimated from 9 days = ~3 games ✓ (uses time-based estimation)
 
     Args:
-        df: DataFrame with Player_ID, SEASON_ID, GAME_DATE_PARSED columns
+        df: DataFrame with Player_ID, TEAM, SEASON_ID, GAME_DATE_PARSED columns
 
     Returns:
         DataFrame with games_missed column added
     """
     logger.info("Calculating games missed (vectorized)...")
 
-    # Sort oldest to newest for diff calculations
+    # Sort oldest to newest
+    df = df.sort_values(['TEAM', 'SEASON_ID', 'GAME_DATE_PARSED', 'Player_ID'])
+
+    # Step 1: For each TEAM+SEASON, number the games sequentially (VECTORIZED)
+    logger.info("  Creating team game sequences...")
+    df['team_game_number'] = (
+        df.groupby(['TEAM', 'SEASON_ID'])['GAME_DATE_PARSED']
+        .transform(lambda x: pd.factorize(x.sort_values())[0] + 1)
+    )
+
+    # Step 2: Calculate games missed per player-season (VECTORIZED)
+    logger.info("  Calculating games missed per player...")
     df = df.sort_values(['Player_ID', 'SEASON_ID', 'GAME_DATE_PARSED'])
 
-    # Group by player and season (NOT team, so trades don't reset the counter)
-    grouped = df.groupby(['Player_ID', 'SEASON_ID'], group_keys=False)
-    total_groups = len(grouped)
-    logger.info(f"  Processing {total_groups} player-season groups...")
+    # Group by player-season and calculate diffs (VECTORIZED)
+    grouped = df.groupby(['Player_ID', 'SEASON_ID'])
 
-    def calculate_games_missed_for_group(group):
-        """Calculate games missed for a single player-season group."""
-        group = group.sort_values('GAME_DATE_PARSED')
+    # Check if team changed between consecutive games (VECTORIZED)
+    df['_prev_team'] = grouped['TEAM'].shift(1)
+    df['_team_changed'] = (df['TEAM'] != df['_prev_team']) & df['_prev_team'].notna()
 
-        # Calculate days between consecutive games (vectorized)
-        # diff() returns NaT for first game, which becomes NaN when we convert to days
-        days_since_last_game = group['GAME_DATE_PARSED'].diff().dt.days
+    # Get previous team_game_number (VECTORIZED)
+    df['_prev_team_game_num'] = grouped['team_game_number'].shift(1)
 
-        # Estimate games missed based on NBA schedule
-        # NBA teams play ~82 games in ~180 days (Oct-Apr) = 1 game per 2.2 days
-        # If a player missed 5 days, that's roughly 5/2.2 ≈ 2.3 games, floor to 2
-        # Subtract 1 day for normal rest (back-to-back is 1 day, normal is 2-3 days)
-        games_missed = np.floor(np.maximum(0, days_since_last_game - 1) / 2.2)
+    # Get days since last game (VECTORIZED)
+    df['_days_since_last'] = grouped['GAME_DATE_PARSED'].diff().dt.days
 
-        # Fill NaN (first game for player-season) with 0
-        games_missed = games_missed.fillna(0.0)
+    # Calculate games_missed based on whether team changed (VECTORIZED)
+    # If same team: use team_game_number diff
+    # If different team: estimate from days
+    df['games_missed'] = np.where(
+        df['_team_changed'],
+        # Team changed (trade) - estimate from days: (days - 1) / 2.2
+        np.floor(np.maximum(0, df['_days_since_last'] - 1) / 2.2),
+        # Same team - use actual team game sequence: current_game_num - prev_game_num - 1
+        np.maximum(0, df['team_game_number'] - df['_prev_team_game_num'] - 1)
+    )
 
-        # NO shift(1) needed - diff() already looks backward one row
-        # games_missed[N] represents gap between game[N-1] and game[N]
-        group['games_missed'] = games_missed
+    # Fill NaN (first game for player-season) with 0 (VECTORIZED)
+    df['games_missed'] = df['games_missed'].fillna(0.0)
 
-        return group
-
-    results = []
-    for i, (name, group) in enumerate(grouped):
-        if i % 100 == 0 and i > 0:
-            logger.info(f"    Progress: {i}/{total_groups} groups processed")
-        results.append(calculate_games_missed_for_group(group))
-
-    result = pd.concat(results)
+    # Drop temporary columns
+    df = df.drop(columns=['_prev_team', '_team_changed', '_prev_team_game_num', '_days_since_last'])
 
     # Sort back to newest first
-    result = result.sort_values(['Player_ID', 'GAME_DATE_PARSED'], ascending=[True, False])
+    df = df.sort_values(['Player_ID', 'GAME_DATE_PARSED'], ascending=[True, False])
 
-    logger.info("✓ Games missed calculated")
-    return result
+    logger.info("✓ Games missed calculated using actual team game sequences (with trade detection)")
+    return df
 
 
 def run_phase_2_pa(s3_handler) -> Tuple[bool, dict]:
