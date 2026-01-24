@@ -328,16 +328,17 @@ def calculate_games_missed_vectorized(df: pd.DataFrame) -> pd.DataFrame:
     """
     Calculate games missed between consecutive games using VECTORIZED operations.
 
-    Games missed = number of games a player's team played between their last game
-    and the current game. This helps identify players returning from injury or rest.
+    Games missed = number of games missed between player's consecutive games within a season.
+    This helps identify players returning from injury or rest.
 
     Calculation:
-    - Calculate days between consecutive games for each player-team
+    - Calculate days between consecutive games for each player-season (NOT player-team)
+    - This ensures trades don't reset the counter - a player traded mid-season continues their streak
     - Estimate games missed using NBA average schedule (1 game per ~2.2 days)
     - Use shift(1) to exclude current game (consistent with other features)
 
     Args:
-        df: DataFrame with Player_ID, TEAM, GAME_DATE_PARSED columns
+        df: DataFrame with Player_ID, SEASON_ID, GAME_DATE_PARSED columns
 
     Returns:
         DataFrame with games_missed column added
@@ -345,15 +346,15 @@ def calculate_games_missed_vectorized(df: pd.DataFrame) -> pd.DataFrame:
     logger.info("Calculating games missed (vectorized)...")
 
     # Sort oldest to newest for diff calculations
-    df = df.sort_values(['Player_ID', 'TEAM', 'GAME_DATE_PARSED'])
+    df = df.sort_values(['Player_ID', 'SEASON_ID', 'GAME_DATE_PARSED'])
 
-    # Group by player and team
-    grouped = df.groupby(['Player_ID', 'TEAM'], group_keys=False)
+    # Group by player and season (NOT team, so trades don't reset the counter)
+    grouped = df.groupby(['Player_ID', 'SEASON_ID'], group_keys=False)
     total_groups = len(grouped)
-    logger.info(f"  Processing {total_groups} player-team groups...")
+    logger.info(f"  Processing {total_groups} player-season groups...")
 
     def calculate_games_missed_for_group(group):
-        """Calculate games missed for a single player-team group."""
+        """Calculate games missed for a single player-season group."""
         group = group.sort_values('GAME_DATE_PARSED')
 
         # Calculate days between consecutive games (vectorized)

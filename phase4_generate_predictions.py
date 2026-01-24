@@ -213,7 +213,7 @@ def get_players_playing_today(s3_handler, teams_playing, league_leaders_df, stat
         'PRA': 'processed_data/processed_with_all_pct_10-51.csv',
         'RA': 'processed_data_ra/processed_with_ra_pct_5-26.csv',
         'PA': 'processed_data_pa/processed_with_pa_pct_5-40.csv',
-        'PR': 'processed_data_pr/processed_with_pr_pct_5-40.csv',
+        'PR': 'processed_data_pr/processed_with_pr_pct_8-41.csv',
     }
 
     data_path = data_paths.get(stat_type.upper())
@@ -291,7 +291,7 @@ def load_all_models(s3_handler, stat_type='PRA', threshold_start=None, threshold
         'PRA': {'start': 10, 'end': 52, 'folder': 'models', 'prefix': 'xgb_pra'},
         'RA': {'start': 5, 'end': 27, 'folder': 'models_ra', 'prefix': 'xgb_ra'},
         'PA': {'start': 8, 'end': 41, 'folder': 'models_pa', 'prefix': 'xgb_pa'},
-        'PR': {'start': 8, 'end': 41, 'folder': 'models_pr', 'prefix': 'xgb_pr'},
+        'PR': {'start': 8, 'end': 42, 'folder': 'models_pr', 'prefix': 'xgb_pr'},
     }
 
     config = stat_configs.get(stat_type.upper())
@@ -503,6 +503,23 @@ def reconstruct_features_for_prediction(player_row, full_df, thresholds, today_o
 
     # Opponent strength - get from opponent's most recent games
     features['opp_strength'] = get_opponent_strength(full_df, opponent, current_season)
+
+    # Games missed - calculate days since last game and estimate games missed
+    # Use player_season_games (not player_team_games) so trades don't reset the counter
+    if len(player_season_games) >= 2:
+        # Get the two most recent games in the season
+        last_two_games = player_season_games.tail(2)
+        last_game_date = last_two_games.iloc[-1]['GAME_DATE_PARSED']
+        second_last_game_date = last_two_games.iloc[-2]['GAME_DATE_PARSED']
+
+        # Calculate days between games
+        days_diff = (last_game_date - second_last_game_date).days
+
+        # Estimate games missed (1 game per 2.2 days, subtract 1 day for normal rest)
+        features['games_missed'] = max(0, np.floor((days_diff - 1) / 2.2))
+    else:
+        # First or second game for this player in the season, no games missed
+        features['games_missed'] = 0.0
 
     # ========================================================================
     # THRESHOLD-SPECIFIC PERCENTAGE FEATURES
@@ -923,6 +940,23 @@ def reconstruct_features_for_ra_prediction(player_row, full_df, thresholds, oppo
     # Opponent strength - get from opponent's most recent games
     features['opp_strength'] = get_opponent_strength(full_df, opponent, current_season)
 
+    # Games missed - calculate days since last game and estimate games missed
+    # Use player_season_games (not player_team_games) so trades don't reset the counter
+    if len(player_season_games) >= 2:
+        # Get the two most recent games in the season
+        last_two_games = player_season_games.tail(2)
+        last_game_date = last_two_games.iloc[-1]['GAME_DATE_PARSED']
+        second_last_game_date = last_two_games.iloc[-2]['GAME_DATE_PARSED']
+
+        # Calculate days between games
+        days_diff = (last_game_date - second_last_game_date).days
+
+        # Estimate games missed (1 game per 2.2 days, subtract 1 day for normal rest)
+        features['games_missed'] = max(0, np.floor((days_diff - 1) / 2.2))
+    else:
+        # First or second game for this player in the season, no games missed
+        features['games_missed'] = 0.0
+
     # Threshold-specific percentage features
     for threshold in thresholds:
         # Last 5 games
@@ -1284,6 +1318,23 @@ def reconstruct_features_for_pa_prediction(player_row, full_df, thresholds, oppo
 
     # Opponent strength - get from opponent's most recent games
     features['opp_strength'] = get_opponent_strength(full_df, opponent, current_season)
+
+    # Games missed - calculate days since last game and estimate games missed
+    # Use player_season_games (not player_team_games) so trades don't reset the counter
+    if len(player_season_games) >= 2:
+        # Get the two most recent games in the season
+        last_two_games = player_season_games.tail(2)
+        last_game_date = last_two_games.iloc[-1]['GAME_DATE_PARSED']
+        second_last_game_date = last_two_games.iloc[-2]['GAME_DATE_PARSED']
+
+        # Calculate days between games
+        days_diff = (last_game_date - second_last_game_date).days
+
+        # Estimate games missed (1 game per 2.2 days, subtract 1 day for normal rest)
+        features['games_missed'] = max(0, np.floor((days_diff - 1) / 2.2))
+    else:
+        # First or second game for this player in the season, no games missed
+        features['games_missed'] = 0.0
 
     # Threshold-specific percentage features
     for threshold in thresholds:
@@ -1650,6 +1701,23 @@ def reconstruct_features_for_pr_prediction(player_row, full_df, thresholds, oppo
     # Opponent strength - get from opponent's most recent games
     features['opp_strength'] = get_opponent_strength(full_df, opponent, current_season)
 
+    # Games missed - calculate days since last game and estimate games missed
+    # Use player_season_games (not player_team_games) so trades don't reset the counter
+    if len(player_season_games) >= 2:
+        # Get the two most recent games in the season
+        last_two_games = player_season_games.tail(2)
+        last_game_date = last_two_games.iloc[-1]['GAME_DATE_PARSED']
+        second_last_game_date = last_two_games.iloc[-2]['GAME_DATE_PARSED']
+
+        # Calculate days between games
+        days_diff = (last_game_date - second_last_game_date).days
+
+        # Estimate games missed (1 game per 2.2 days, subtract 1 day for normal rest)
+        features['games_missed'] = max(0, np.floor((days_diff - 1) / 2.2))
+    else:
+        # First or second game for this player in the season, no games missed
+        features['games_missed'] = 0.0
+
     # Threshold-specific percentage features
     for threshold in thresholds:
         # Last 5 games
@@ -1764,8 +1832,8 @@ def run_pr_over_gauntlet(reconstructed_features, models):
 
     if highest_passed is not None:
         line = highest_passed - 0.5
-        # PR line range: 4.5 to 38.5
-        if line >= 4.5 and line <= 38.5:
+        # PR line range: 7.5 to 40.5
+        if line >= 7.5 and line <= 40.5:
             return {
                 'prop_type': 'OVER',
                 'line': line,
@@ -1836,8 +1904,8 @@ def run_pr_under_gauntlet(reconstructed_features, models):
 
     if lowest_passed is not None:
         line = lowest_passed + 0.5
-        # PR line range: 4.5 to 38.5
-        if line >= 4.5 and line <= 38.5:
+        # PR line range: 7.5 to 40.5
+        if line >= 7.5 and line <= 40.5:
             return {
                 'prop_type': 'UNDER',
                 'line': line,
@@ -2131,7 +2199,10 @@ def get_injured_players():
     try:
         logger.info("Fetching injury data from ESPN...")
         url = 'https://www.espn.com/nba/injuries'
-        response = requests.get(url, timeout=10)
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        }
+        response = requests.get(url, headers=headers, timeout=10)
         response.raise_for_status()
 
         soup = BeautifulSoup(response.content, 'html.parser')
@@ -2217,7 +2288,8 @@ def should_exclude_player(return_date_str, today):
 
 def names_match(name1, name2):
     """
-    Check if two player names match, handling variations like "Zach Edey" vs "Z. Edey".
+    Check if two player names match, handling variations like "Zach Edey" vs "Z. Edey"
+    and accented characters like "Jokić" vs "Jokic".
 
     Args:
         name1: First name to compare
@@ -2226,8 +2298,15 @@ def names_match(name1, name2):
     Returns:
         bool: True if names likely refer to same player
     """
+    import unicodedata
+
     # Normalize both names
     def normalize(name):
+        # Remove accents by decomposing and removing combining characters
+        # NFD = Canonical Decomposition (e.g., é -> e + ́)
+        nfd = unicodedata.normalize('NFD', name)
+        # Filter out combining characters (accents)
+        name = ''.join(char for char in nfd if unicodedata.category(char) != 'Mn')
         # Remove dots and extra spaces
         name = name.replace('.', '').strip()
         # Convert to lowercase
@@ -2259,9 +2338,10 @@ def names_match(name1, name2):
         first1 = parts1[0] if len(parts1) > 1 else ""
         first2 = parts2[0] if len(parts2) > 1 else ""
 
-        # One is initial of the other
+        # One is initial of the other (check if one is 1-2 chars and matches first letter)
         if first1 and first2:
-            if first1[0] == first2[0]:
+            if (len(first1) <= 2 and first1[0] == first2[0]) or \
+               (len(first2) <= 2 and first1[0] == first2[0]):
                 return True
 
     return False
@@ -2279,6 +2359,10 @@ def filter_injured_players(props_df, today):
         DataFrame: Filtered predictions with injured players removed
     """
     initial_count = len(props_df)
+    logger.info(f"\n{'='*80}")
+    logger.info(f"INJURY FILTERING (Today: {today})")
+    logger.info(f"{'='*80}")
+    logger.info(f"Predictions before filtering: {initial_count}")
 
     # Get injured players
     injured_players = get_injured_players()
@@ -2297,7 +2381,7 @@ def filter_injured_players(props_df, today):
         logger.info("No players need to be excluded based on injury status")
         return props_df
 
-    logger.info(f"Checking {len(excluded_espn_names)} injured players from ESPN:")
+    logger.info(f"\nPlayers to exclude ({len(excluded_espn_names)} total):")
     for player in excluded_espn_names:
         return_date = injured_players.get(player, 'Unknown')
         logger.info(f"  - {player} (return: {return_date})")
@@ -2311,18 +2395,22 @@ def filter_injured_players(props_df, today):
         for espn_name in excluded_espn_names:
             if names_match(props_name, espn_name):
                 rows_to_remove.append(idx)
-                matched_players.append(f"{props_name} (ESPN: {espn_name})")
+                matched_players.append(f"{props_name} ({row['STAT_TYPE']}) - ESPN: {espn_name}")
                 break
 
     if rows_to_remove:
-        logger.info(f"Matched and removing {len(rows_to_remove)} players:")
+        logger.info(f"\n✓ Matched and removing {len(rows_to_remove)} predictions:")
         for player in matched_players:
             logger.info(f"  - {player}")
 
         props_df = props_df.drop(rows_to_remove).copy()
-        logger.info(f"Removed {len(rows_to_remove)} predictions for injured players")
+        final_count = len(props_df)
+        logger.info(f"\nPredictions after filtering: {final_count} (removed {initial_count - final_count})")
     else:
-        logger.info("No matching players found in predictions to exclude")
+        logger.info("\nNo matching players found in predictions to exclude")
+        logger.info(f"Predictions after filtering: {initial_count} (removed 0)")
+
+    logger.info(f"{'='*80}\n")
 
     return props_df
 
