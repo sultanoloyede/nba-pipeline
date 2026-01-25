@@ -243,21 +243,30 @@ def calculate_season_percentage_all_thresholds_vectorized(df: pd.DataFrame, thre
     """
     logger.info(f"  Calculating season_pct for {len(thresholds)} thresholds (VECTORIZED)...")
 
+    # Save original index before sorting
+    original_index = df.index.copy()
+
     # Sort oldest to newest
-    df = df.sort_values(['Player_ID', 'TEAM', 'SEASON_ID', 'GAME_DATE_PARSED'])
+    df_sorted = df.sort_values(['Player_ID', 'TEAM', 'SEASON_ID', 'GAME_DATE_PARSED'])
 
     # Initialize result dict with NaN arrays
     threshold_results = {t: np.full(len(df), np.nan) for t in thresholds}
 
     # For each threshold, calculate season percentage using transform
     for threshold in thresholds:
-        # Create boolean column where PA >= threshold
-        met_threshold = (df['PA'] >= threshold).astype(float)
+        # Create boolean column where PA >= threshold (on sorted df)
+        met_threshold = (df_sorted['PA'] >= threshold).astype(float)
 
-        # Use groupby + transform with expanding mean (excludes current game)
-        threshold_results[threshold] = df.groupby(['Player_ID', 'TEAM', 'SEASON_ID']).apply(
+        # Use groupby + apply with expanding mean (excludes current game)
+        result_series = df_sorted.groupby(['Player_ID', 'TEAM', 'SEASON_ID']).apply(
             lambda group: pd.Series(met_threshold.loc[group.index]).expanding().mean().shift(1)
-        ).values
+        )
+
+        # Drop the groupby multi-index levels to get back to original df index
+        result_series = result_series.droplevel([0, 1, 2])
+
+        # Reindex to match original df order (before sorting) and convert to array
+        threshold_results[threshold] = result_series.reindex(original_index).values
 
     logger.info(f"    ✓ Completed season_pct for all thresholds")
     return threshold_results
@@ -298,9 +307,12 @@ def calculate_last_season_percentage_all_thresholds_vectorized(df: pd.DataFrame,
         # Shift to next season
         season_pct['SEASON_ID'] = season_pct['SEASON_ID'] + 1
 
-        # Merge back to get last season pct
+        # Merge back to get last season pct - reset_index() preserves original row order
         df_temp = df[['Player_ID', 'SEASON_ID']].reset_index()
         df_merged = df_temp.merge(season_pct, on=['Player_ID', 'SEASON_ID'], how='left')
+
+        # Sort by original index to ensure correct order, then extract values
+        df_merged = df_merged.sort_values('index')
 
         # Fill NaN with 0 and store
         threshold_results[threshold] = df_merged['pct'].fillna(0.0).values
